@@ -62,7 +62,6 @@ $event = @{
     eventStatus = "Scheduled"
     source      = "DemoSimulator"
     notBefore   = (Get-Date).ToUniversalTime().AddMinutes(15).ToString("o")
-    leadSeconds = 0
     description = "Simulated Azure IMDS Scheduled Event ($EventType) for the AKS maintenance demonstration."
 } | ConvertTo-Json -Compress
 $patch = @{ data = @{ "event.json" = $event } } | ConvertTo-Json -Compress
