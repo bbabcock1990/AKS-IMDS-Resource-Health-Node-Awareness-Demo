@@ -1,79 +1,101 @@
-# AKS Maintenance Demo
+# AKS Node Maintenance Awareness Demo
 
-This demo shows how an AKS workload can consume Azure VM Scheduled Events and
-translate an actionable event into Kubernetes node protection.
+When Azure needs to reboot, redeploy, or repair the physical host under an AKS
+node, the node can be pulled out from under running pods with little warning.
+This demo detects that maintenance **before** it happens and protects the
+workload automatically — it cordons the node, drains the pods safely, records
+the event, and (optionally) posts a Microsoft Teams card.
 
-## What the demo proves
+## What it covers
 
-Two components split the work:
+- **Detect** upcoming host maintenance from Azure **IMDS Scheduled Events**,
+  read locally on each AKS node.
+- **Act** only on the events that actually disrupt a node: `Reboot` and
+  `Redeploy`. Everything else is logged and ignored.
+- **Protect** the workload: cordon the node, then drain it using the Kubernetes
+  Eviction API so Pod Disruption Budgets are honored.
+- **Schedule** the cordon a configurable lead time ahead of the maintenance
+  window instead of reacting at the last second.
+- **Record** every event and state change in a persistent store with a
+  de-duplicated audit trail and a live dashboard/API.
+- **Notify** an external system (Teams / ServiceNow / Google Chat) on each
+  state change.
 
-**`maintenance-controller`** (DaemonSet, one pod per node):
-- AKS nodes can read the Azure IMDS Scheduled Events endpoint.
-- VMSS events must be filtered to the affected VM using the `Resources` field.
-- The controller distinguishes Azure signals from a safe simulated signal.
-- A node is cordoned before workload eviction.
-- Evictions use the Kubernetes Eviction API and honor Pod Disruption Budgets.
-- Workloads move to the remaining schedulable node.
-- Event identifiers and controller state are stored as node annotations.
-- Cordon is scheduled at a **configurable lead time** before the window
-  (`leadSeconds` / `LEAD_SECONDS`).
-- Structured logs provide an audit trail and can be forwarded to a webhook.
+## How it works
 
-**`maintenance-operator`** (Deployment + PersistentVolume, the control plane):
-- Receives a **state-transition report from every controller** (each node POSTs
-  to the operator's `/events` endpoint) — the fleet-wide aggregation point.
-- Keeps a **persistent normalized store + action-history audit trail** (SQLite
-  on a PVC) and **de-duplicates** repeated reports of the same event.
-- Serves a **live dashboard + JSON API** (`/`, `/api/events`, `/api/upcoming`,
-  `/api/history`) listing tracked and upcoming maintenance actions.
+Two components split the job:
 
-> **Resource Health is intentionally not a signal source.** Resource Health
-> "Degraded" is reactive and fires on routine VMSS scale-in, so it is unsafe to
-> automate off. The only automation trigger is IMDS Scheduled Events (a typed,
-> push-ahead notice that never fires for autoscaler scale operations).
+**`maintenance-controller`** — a DaemonSet, one pod per node.
+- Polls the node-local IMDS Scheduled Events endpoint every 2 seconds.
+- Filters events to its own VM and acts only on `Reboot` / `Redeploy`.
+- Cordons the node, drains the demo namespace, and records progress as node
+  annotations and structured logs.
+- Reports every state change to the operator and to the notification webhook.
+
+**`maintenance-operator`** — a Deployment with a persistent volume.
+- Receives a state-change report from every controller (the fleet-wide
+  aggregation point).
+- Stores normalized events + action history in SQLite and de-duplicates repeats.
+- Serves a live dashboard and JSON API (`/`, `/api/events`, `/api/upcoming`,
+  `/api/history`).
+
+**The signal flow:**
+
+```
+Azure host maintenance
+   → IMDS Scheduled Events (per node)
+   → controller: filter to Reboot/Redeploy
+   → cordon node → drain pods (PDB-safe)
+   → report to operator store + notification webhook
+```
+
+**Why IMDS Scheduled Events, and not Resource Health:** Scheduled Events is a
+typed, ahead-of-time notice of a specific action on a specific VM. Resource
+Health "Degraded" is reactive and can also fire during normal autoscaler
+scale-in, so acting on it would cordon healthy nodes. This demo uses Scheduled
+Events as its only trigger.
+
+## What it accomplishes
+
+- Pods are moved off a node **before** Azure takes it down, instead of being
+  disrupted mid-maintenance.
+- Autoscaler scale-in and other routine platform noise never trigger a cordon.
+- Every maintenance action is captured, de-duplicated, and auditable.
+- Operators get proactive awareness via a dashboard and optional Teams alerts.
 
 ## Safety defaults
 
-- Live Azure events are **observe-only** by default.
+- Live Azure events are **observe-only** by default; nothing is acted on until
+  `LIVE_ACTION_MODE` is set to `act`.
 - Only the `aks-maintenance-demo` namespace is drained.
-- The demo does not modify the AKS-managed VM Scale Set.
-- No live event is acknowledged unless `LIVE_ACTION_MODE` is deliberately
-  changed to `act`.
+- The demo never modifies the AKS-managed VM Scale Set.
 
-These defaults allow the scenario to be demonstrated without forcing real
-Azure maintenance or disrupting system workloads.
-
-Only actionable Scheduled Event types drive a cordon. The controller acts on
-`Redeploy` and `Reboot` and ignores everything else — so routine platform noise
-and autoscaler activity never trigger node protection.
-
-The controller installs its Python dependencies when the demo pod starts to
-avoid requiring a container registry. A production implementation should use
-an immutable, scanned image, durable external event storage, narrowly scoped
-RBAC, alert retry/dead-letter handling, and a tested full-node drain policy.
+> The controller installs its Python dependencies at pod start to avoid needing a
+> container registry. A production build should use an immutable, scanned image,
+> durable external storage, scoped RBAC, alert retry/dead-letter handling, and a
+> tested full-node drain policy.
 
 ## Azure resources
 
-- Resource group: `aks-maintenance-demo-rg`
-- AKS cluster: `aks-maintenance-demo`
-- Region: `westus2`
-- Tier: Free control plane
-- Nodes: 2 x `Standard_D2als_v7`
-
-The subscription does not permit the lower-cost B-series SKUs. Delete the
-resource group after the demonstration to stop compute charges.
+| Item | Value |
+| --- | --- |
+| Resource group | `aks-maintenance-demo-rg` |
+| AKS cluster | `aks-maintenance-demo` |
+| Region | `westus2` |
+| Nodes | 2 x `Standard_D2als_v7` |
 
 ## Deploy
 
 ```powershell
-Set-Location "$env:USERPROFILE\OneDrive - Microsoft\Desktop\AKS-Maintance-Demo"
+git clone https://github.com/bbabcock1990/AKS-IMDS-Resource-Health-Node-Awareness-Demo.git
+Set-Location AKS-IMDS-Resource-Health-Node-Awareness-Demo
 .\deploy.ps1
 ```
 
-## Run the demonstration
+## Run the demo
 
-> For a full presenter walkthrough with per-step explanations, simulation-vs-real
-> mapping, and concern-by-concern answers, see **`DEMO-RUNBOOK.md`**.
+> For a full presenter walkthrough with per-step talk tracks, see
+> **`DEMO-RUNBOOK.md`**.
 
 ```powershell
 .\demo.ps1
@@ -90,91 +112,46 @@ The script:
 
 Use `.\status.ps1` to inspect the environment at any time.
 
-## Advanced scenarios (closing the full in-scope list)
+## Advanced scenarios
 
 ```powershell
-# IMDS Reboot (or Redeploy) end to end, with the operator store: detect ->
-# cordon/drain -> persistent store -> dedup. See RUNBOOK Step 8c.
+# IMDS Reboot/Redeploy end to end, with the operator store and dedup:
 .\demo-reboot.ps1                 # or: .\demo-reboot.ps1 -EventType Redeploy
 
-# Lead-time scheduling: controller holds in 'Scheduled' then acts leadSeconds
-# before the maintenance window. See RUNBOOK Step 8d.
+# Lead-time scheduling: controller holds, then acts leadSeconds before the window:
 .\demo-leadtime.ps1 -WindowSeconds 120 -LeadSeconds 60
 
-# Live operator dashboard + API (upcoming actions, events, dedup, audit trail):
+# Live operator dashboard + API:
 kubectl port-forward -n aks-maintenance-demo svc/maintenance-operator 8080:8080
 # then open http://localhost:8080/
 ```
 
-## Suggested customer talk track
+## Notifications (Teams / ServiceNow / Google Chat)
 
-1. **Resource Health is not the action trigger.** A VMSS can report a transient
-   `Degraded` state during normal scale operations, so automating off it would
-   cordon healthy nodes. This demo deliberately excludes it.
-2. **Scheduled Events is the machine-actionable signal.** The controller polls
-   IMDS from every AKS node and acts only on actionable types (`Redeploy`,
-   `Reboot`), filtered to the affected VM.
-3. **AKS awareness is customer/controller logic.** Azure provides the VM event;
-   the controller maps it to a Kubernetes node and performs cordon and eviction.
-4. **Notice is bounded.** Reboot/freeze commonly provide 15 minutes and redeploy
-   commonly provides 10 minutes. Sudden hardware failure might provide no notice.
-5. **Drain safety matters.** PDBs are honored, failed drains are surfaced, and a
-   live event must not be acknowledged before preparation succeeds.
-6. **Networking remains a separate investigation.** Persistent pod networking
-   problems after rescheduling are not assumed to be normal and require CNI,
-   EndpointSlice, load-balancer, conntrack, and pod lifecycle evidence.
-
-## Optional notifications (Teams / ServiceNow / Google Chat)
-
-The controller POSTs a structured event to `NOTIFICATION_WEBHOOK_URL` at every
-state transition. A ready-made **Teams** pipeline (Azure Logic App → Adaptive
-Card) is included and stands in for ServiceNow / Google Chat.
-
-**How an IMDS event becomes a Teams card (end-to-end):**
-
-1. Azure schedules host maintenance and publishes a typed `Reboot`/`Redeploy`
-   notice to the VM's **IMDS Scheduled Events** endpoint.
-2. The per-node `maintenance-controller` polls node-local IMDS every
-   `POLL_SECONDS` (default 2s) and filters events to its own VM via `Resources`.
-3. `handle_event()` gates the event: it must be `Scheduled` **and** an actionable
-   type (`Reboot`/`Redeploy`). Anything else is `Observed`-only, so autoscaler
-   scale-in — which never appears in Scheduled Events — cannot raise a card.
-4. On each lifecycle transition (`Detected → Cordoned → Drained →
-   Acknowledged`/`SimulatedComplete`), `notify()` builds a JSON payload and
-   `POST`s it to both `NOTIFICATION_WEBHOOK_URL` (Teams) and `EVENT_STORE_URL`
-   (operator store).
-5. The Logic App HTTP trigger receives the payload, composes an **Adaptive Card**
-   (State / Event Type / Node / Source / Event ID / Detail), and — if a Teams
-   `Workflows` webhook URL is configured — POSTs the card to the channel.
+On every state change the controller POSTs a JSON payload to a webhook. A ready-
+made **Teams** pipeline (Azure Logic App → Adaptive Card) is included and stands
+in for ServiceNow or Google Chat.
 
 ```
-Azure host → IMDS Scheduled Events → controller poll (2s) → filter Reboot/Redeploy
-   → handle_event → notify() → Logic App → Adaptive Card → Teams Workflows webhook
+controller (state change) → Logic App → Adaptive Card → Teams Workflows webhook
 ```
 
-> A Teams card fires **once per state transition**, and only for IMDS
-> `Reboot`/`Redeploy` events. Two independent toggles gate delivery:
-> `NOTIFICATION_WEBHOOK_URL` (controller → Logic App) and the Logic App's
-> `teamsWebhookUrl` (Logic App → channel). Either can stay blank for a dry run.
-
-**This is wired automatically** — `deploy.ps1` calls `deploy-notifications.ps1`,
-so once the environment is up, `demo.ps1` fires notifications on its own with no
+A card fires once per state change, only for `Reboot` / `Redeploy` events. It is
+wired automatically by `deploy.ps1`, so `demo.ps1` sends notifications with no
 extra step.
 
 ```powershell
-# Deliver real cards to a Teams channel: create a Teams 'Workflows' webhook,
-# then supply its URL at deploy time (or re-wire later without rebuilding):
+# Deliver real cards to a Teams channel (create a Teams 'Workflows' webhook first):
 .\deploy.ps1 -TeamsWebhookUrl "<workflows-url>"
-# or, cluster already up:
+# or, if the cluster is already up:
 .\deploy-notifications.ps1 -TeamsWebhookUrl "<workflows-url>"
 
-# Validate the pipeline out-of-band (no drain needed):
+# Test the pipeline on its own (no drain needed):
 .\test-notification.ps1 -State Cordoned
 ```
 
-To target ServiceNow or Google Chat instead, swap the final action in
-`notifications\teams-logicapp.json` (or the Logic App designer). See
-`DEMO-RUNBOOK.md` **Step 8b** for the full walkthrough.
+To target ServiceNow or Google Chat, swap the final action in
+`notifications\teams-logicapp.json`. See `DEMO-RUNBOOK.md` **Step 8b**.
 
 ## Cleanup
 
@@ -182,4 +159,5 @@ To target ServiceNow or Google Chat instead, swap the final action in
 .\cleanup.ps1
 ```
 
-The cleanup script deletes the Azure resource group but retains this folder.
+Deletes the Azure resource group (stopping all compute charges) and keeps this
+folder.
