@@ -23,8 +23,8 @@
 > the host under it — a **reboot** or a **redeploy** — it publishes a **Scheduled
 > Event** to that VM *before* it acts. The problem today is nobody on the
 > Kubernetes side is *listening*, so Azure can move the node out from under AKS
-> while pods are still running on it — the rug-pull, plus the residual
-> pod-networking mess afterward. This demo is a small controller that listens, and
+> while pods are still running on it — the rug-pull, and the disruption that
+> follows. This demo is a small controller that listens, and
 > when an event arrives it **cordons** the node (stops new pods landing) and
 > **drains** it gracefully (moves running pods off, respecting availability rules)
 > *before* Azure touches the hardware. That converts a disruptive, pull-the-rug
@@ -107,22 +107,20 @@ kubectl get pods -n aks-maintenance-demo -o wide   # controller 2/2, operator 1/
 
 ---
 
-## Opening (2 min) — frame the problem in *their* words
+## Opening (2 min) — frame the problem
 
 🎤 **SAY:**
-> "I want to state your problem back to you so you know we're aligned. Azure treats
-> every AKS node as a VM in a Scale Set. When Azure services the underlying
-> hardware — a **reboot** or a **redeploy** — it does that on the VM. If nothing on
-> the Kubernetes side is *listening*, Azure can move that node out from under AKS
-> while your pods are still running on it. That's the rug-pull you're seeing, and
-> the residual pod-networking mess afterward.
+> "Azure treats every AKS node as a VM in a Scale Set. When Azure services the
+> underlying hardware — a **reboot** or a **redeploy** — it does that on the VM. If
+> nothing on the Kubernetes side is *listening*, Azure can move that node out from
+> under AKS while pods are still running on it — a disruptive rug-pull for the
+> workload.
 >
 > The good news: **Azure announces almost all of this before it happens**, on a
-> signal called Scheduled Events. Nobody's job by default is to listen and
-> translate it into a Kubernetes action. Today I'll show you a small, safe
-> reference implementation that does exactly that — and I'll be explicit about
-> what's real Azure behavior versus what I'm simulating so we can trigger it on a
-> call."
+> signal called Scheduled Events. By default nothing listens for it and translates
+> it into a Kubernetes action. This demo is a small, safe reference implementation
+> that does exactly that — and I'll be explicit about what's real Azure behavior
+> versus what's simulated, so the whole thing can be triggered on demand."
 
 🧠 **HOW IT WORKS:** AKS node pools are VM Scale Sets; the AKS control plane is
 managed, but the *nodes* are VMs subject to platform maintenance.
@@ -533,7 +531,7 @@ per-node controller: IMDS Scheduled Events (Redeploy/Reboot)
 ```
 
 🎤 **SAY:**
-> "You asked for control-plane things a per-node agent can't do well: a *durable*
+> "These are control-plane concerns a per-node agent can't do well: a *durable*
 > fleet-wide store, *dedupe* of repeat reports, and an operator *dashboard*. Let me
 > run a Reboot end-to-end and watch it land in the store."
 
@@ -580,9 +578,9 @@ deduplication (#4), and maintenance-action notification (#6).
 
 ## Step 10 — Lead-time scheduling (cordon *ahead* of the window)
 
-You didn't just ask to cordon — you asked to cordon at a **configurable lead time
-before** maintenance. The controller honors the event's `notBefore` and cordons
-`leadSeconds` **before** the window, not on first sight.
+Beyond cordoning the moment an event is detected, the controller can cordon at a
+**configurable lead time before** maintenance. It honors the event's `notBefore`
+and cordons `leadSeconds` **before** the window, not on first sight.
 
 ```powershell
 .\demo-leadtime.ps1 -WindowSeconds 120 -LeadSeconds 60
@@ -661,10 +659,10 @@ flowchart LR
 
 ---
 
-## Close (3 min) — tie it back and make the ask
+## Wrap-up (3 min) — recap
 
 🎤 **SAY (scorecard):**
-> "Against the list you sent, here's where we landed — all live, today:
+> "Everything this demo set out to show, all live:
 > 1. Poll maintenance signals (IMDS Scheduled Events on every node) ✔
 > 2. Map VMSS instance to AKS cluster + node ✔
 > 3. Persistent, normalized store with action history ✔
@@ -688,14 +686,6 @@ flowchart LR
 > into the Logic App we already proved with Teams. That's configuration and
 > packaging — the pattern doesn't change."
 
-🎤 **SAY (the ask / next steps):**
-> "What I'd propose: I'll share this reference implementation and guide. You point it
-> at a non-prod subscription, we validate against your actual node pools, and from
-> there it's your call how deep to integrate with ServiceNow. And separately — the
-> residual **pod-networking** issue after redeploy is a distinct investigation; I'd
-> like to run that in parallel with CNI, EndpointSlice, load-balancer and conntrack
-> evidence, not lump it in with maintenance."
-
 ---
 
 ## Anticipated questions (keep these ready)
@@ -714,8 +704,8 @@ flowchart LR
 
 - **"Why not let AKS auto-drain / node auto-repair handle it?"**
   > "Those help, but they don't give you the lead-time control, the fleet-wide audit
-  > store, dedup, or the ServiceNow/Chat notification you asked for. This is that
-  > operational layer on top."
+  > store, dedup, or the ServiceNow/Chat notification. This is that operational
+  > layer on top."
 
 - **"What about zero-notice hardware death?"**
   > "No signal exists for that — the answer is resilience: PDBs, multi-node/zone
@@ -785,20 +775,19 @@ az aks stop -g aks-maintenance-demo-rg -n aks-maintenance-demo   # pause: deallo
 
 ---
 
-## Mapping the demo to the requirements
+## Capabilities demonstrated
 
-| Requirement | Where the demo answers it |
+| Capability | Where the demo shows it |
 | --- | --- |
 | Proactive maintenance awareness | Steps 4 & 6 — Scheduled Events detected before impact |
 | Nodes still schedulable when maintenance starts | Step 4 — node cordoned before drain |
 | Azure redeploys the node out from under AKS | Step 4 — controller front-runs Azure: drains first, acknowledges last |
-| Residual pod/network impact after redeploy | Step 4 — graceful eviction + PDB + recovery; networking flagged as a separate, parallel investigation |
-| No dedup / audit / history | Steps 5 & 9 — eventId dedup + JSON audit log + operator's persistent SQLite store & audit trail |
-| Wants ServiceNow / Google Chat notifications | Step 8 — controller → Logic App → Teams Adaptive Card (swap final hop for ServiceNow/Google Chat) |
+| Graceful handling of the workload during redeploy | Step 4 — Eviction API + PDB honored, then recovery, so pods move cleanly before the host is touched |
+| Dedup / audit / history | Steps 5 & 9 — eventId dedup + JSON audit log + operator's persistent SQLite store & audit trail |
+| ServiceNow / Google Chat notifications | Step 8 — controller → Logic App → Teams Adaptive Card (swap final hop for ServiceNow/Google Chat) |
 | Notification of maintenance actions (Reboot/Redeploy) | Steps 8 & 9 — controller notifies on every transition; operator records + surfaces them |
 | Cordon at a configurable lead time before maintenance | Step 10 — controller holds in `Scheduled` and acts `leadSeconds` before `notBefore` |
 | Operator visibility / dashboard of upcoming actions | Steps 9 & 11 — live dashboard + `/api/events`, `/api/upcoming` |
-| Poor Azure support / needs an SME + existing patterns | Whole demo — proven Scheduled Events pattern + working reference implementation |
 
 ---
 
