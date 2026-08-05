@@ -27,10 +27,6 @@ IMDS_HEADERS = {"Metadata": "true"}
 ACTIONABLE_EVENTS = {
     "Reboot",
     "Redeploy",
-    "Preempt",
-    "Terminate",
-    "HardwareDegraded",
-    "HardwareFailure",
 }
 TERMINAL_STATES = {
     "Cordoned",
@@ -125,6 +121,8 @@ def notify(event, state, detail=""):
         "source": event["source"],
         "state": state,
         "detail": detail,
+        "notBefore": event.get("notBefore", ""),
+        "description": event.get("description", ""),
     }
     logging.info("MAINTENANCE_EVENT %s", json.dumps(message, sort_keys=True))
     if WEBHOOK_URL:

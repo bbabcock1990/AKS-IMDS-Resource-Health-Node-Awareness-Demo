@@ -26,14 +26,13 @@ The whole demo is the loop: **Detect → Cordon → Drain → (Acknowledge) → 
   per-VM signal (Azure **Scheduled Events** via IMDS, or an injected demo event)
   and runs the safe **cordon → drain** on its own node. Steps 1–8, 8d.
 - **`maintenance-operator`** — a single **Deployment** with a **PersistentVolume**.
-  The control-plane piece: polls a **prod/dev subscription list** for **Resource
-  Health** (hardware) signals, keeps a **persistent normalized store + audit
-  trail**, **de-duplicates**, fires **hardware-failure notifications**, and serves
-  a **dashboard/API**. Steps 8c. It drives the controller by writing the shared
-  node-event ConfigMap.
+  The control-plane piece: **receives a state-transition report from every
+  controller** and keeps a **persistent normalized store + audit trail**,
+  **de-duplicates**, and serves a **dashboard/API**. It polls nothing and makes
+  zero Kubernetes calls. Step 8c.
 
-Together they cover the full in-scope list: poll → map → persist → dedup →
-schedule → cordon/drain → notify → visualize.
+Together they cover the full in-scope list: detect (IMDS) → map → persist → dedup
+→ schedule → cordon/drain → notify → visualize.
 
 ---
 
@@ -52,7 +51,8 @@ cd "$env:USERPROFILE\OneDrive - Microsoft\Desktop\AKS-Maintance-Demo"
 $env:PATH = "$env:USERPROFILE\.azure-kubectl;$env:USERPROFILE\.azure-kubelogin;$env:PATH"
 ```
 
-**One-time subscription prerequisite** (already done, keep for rebuilds):
+**Optional prerequisite for Step 2's background call** (only needed if you run the
+Resource Health read shown in Step 2 — the mechanism itself no longer uses it):
 ```powershell
 az provider register --namespace Microsoft.ResourceHealth
 ```
@@ -235,7 +235,8 @@ Each controller pod runs a 2-second loop (`POLL_SECONDS`). On every tick it:
 
 **Concern addressed:** Directly answers "I don't want Azure ripping nodes out
 from under AKS" — this front-runs Azure's action and does the graceful thing
-first, with guardrails so it can be trusted in production.
+first, with built-in safety (observe-mode gating + lead-time) so it can be
+trusted in production.
 
 ---
 
@@ -373,8 +374,8 @@ kubectl run imds-check --rm --restart=Never -i `
 success, not an error.
 
 **How it works / real world:** This is the *same* GA endpoint the controller
-polls. When Azure schedules a reboot/redeploy — or predicts a hardware failure —
-a populated event appears here first, e.g.:
+polls. When Azure schedules a reboot or redeploy, a populated event appears
+here first, e.g.:
 ```json
 { "DocumentIncarnation": 1, "Events": [
   { "EventId":"...", "EventType":"Redeploy", "EventStatus":"Scheduled",
@@ -460,17 +461,16 @@ Either path:
 
 ### One-time authorize (the only manual step)
 The Teams API connection deploys in an **unauthorized** state. Authorize it once
-with an account that has Teams so the Flow bot can DM you:
+with your corp account so the Flow bot can DM you:
 
 1. Portal → resource group `aks-maintenance-demo-rg` → API Connection
    **`aks-maint-teams`** → **Edit API connection** → **Authorize** → sign in as
-   your account → **Save**.
+   `you@example.com` → **Save**.
 2. Status flips to **Connected**. (Verified working — a test DM landed in Teams.)
 
-> **Why DM to a separate account?** If your demo tenant/subscription has no
-> Teams/O365 license, authorize the connection against an account in a tenant that
-> does (cross-tenant is fine). In a real deployment the connection would target
-> your own tenant/channel.
+> **Why DM to a corp account?** The demo's MCAP tenant has no Teams/O365 license,
+> so the connection targets your `@example.com` account cross-tenant. In a real
+> deployment the connection would target the customer's own tenant/channel.
 
 ### During the demo — notifications are automatic
 Once authorized, **you don't run anything extra**. When `demo.ps1` injects a
@@ -532,52 +532,53 @@ hub — Teams today, ServiceNow/Google Chat by swapping the final action.
 
 ---
 
-## Step 8c — The central operator: subscription polling, HW-failure, store & dashboard
+## Step 8c — The central operator: store, dedup & dashboard
 
 Steps 1–8 run entirely from the **per-node DaemonSet controller**. That covers
 detection + safe cordon/drain beautifully, but several in-scope items are
-inherently *control-plane* concerns (poll a whole subscription list, keep a
-central store, expose a dashboard). Those live in a second component: the
-**`maintenance-operator`** Deployment (`maintenance_operator.py`).
+inherently *control-plane* concerns: keep one central store across the whole
+fleet, de-duplicate, and expose a dashboard. Those live in a second component:
+the **`maintenance-operator`** Deployment (`maintenance_operator.py`).
 
 ### What it is
-A single-replica Deployment with a **PersistentVolume** (SQLite store) that:
-1. **Polls a prod/dev subscription list** (`maintenance-subscriptions` ConfigMap)
-   and reads **Resource Health-shaped signals** (`maintenance-resource-health`
-   ConfigMap). In production this is one Resource Health
-   `availabilityStatuses` call per subscription via workload identity; in the
-   demo we read the same-shaped JSON from a ConfigMap so we can inject a
-   "Degraded" event on demand.
-2. **Normalizes + persists** every event and **de-duplicates** repeats.
-3. On a **Degraded/Unavailable** (hardware) signal: fires a **Teams card**
-   (`HardwareFailureDetected`) *and* drives the DaemonSet controller to
-   cordon/drain the mapped node — closing the loop.
-4. Serves a **live dashboard + JSON API** of upcoming actions, all events, dedup
-   counts and the full action-history audit trail.
+A single-replica Deployment with a **PersistentVolume** (SQLite store) that is a
+**pure aggregation hub — it polls nothing and makes zero Kubernetes API calls**:
+1. **Receives a state-transition report from every controller.** Each node's
+   controller POSTs to the operator's `/events` endpoint on every transition
+   (Detected → Scheduled → Cordoned → Drained → Complete).
+2. **Normalizes + persists** every reported event and **de-duplicates** repeats
+   (many reports of the same event collapse into one record; `dedup_count`
+   climbs).
+3. Serves a **live dashboard + JSON API** of upcoming actions, all tracked
+   events, dedup counts, and the full action-history audit trail.
+
+> **No Resource Health, no subscription polling.** The only trigger anywhere in
+> this system is IMDS Scheduled Events (`Redeploy` / `Reboot`) read by the
+> controller. The operator simply records what the controllers report — so
+> autoscaler scale-in can never produce a false event here.
 
 ### Architecture
 ```
-Resource Health (per subscription)  --poll-->  operator
-   normalize -> SQLite (PVC)  -> Teams card (HW failure)
-                              -> patch node-event ConfigMap
-                                     -> DaemonSet controller cordons/drains
-   controller notify(each transition) --POST--> operator /events (audit history)
+per-node controller: IMDS Scheduled Events (Redeploy/Reboot)
+   detect -> cordon/drain -> SimulatedComplete
+   notify(each transition) --POST--> operator /events
+                                        operator: normalize -> SQLite (PVC)
+                                                  dedup -> dashboard + JSON API
 ```
 
-### Run the hardware-failure scenario
+### Run the IMDS Reboot/Redeploy scenario end to end
 ```powershell
-.\demo-hardware.ps1
+.\demo-reboot.ps1                 # or: .\demo-reboot.ps1 -EventType Redeploy
 ```
 Step by step, this:
-- Injects a **Resource Health `Degraded`** signal (the exact
-  `VirtualMachinePossiblyDegradedDueToHardwareFailure` case the customer cited) into
-  the `maintenance-resource-health` ConfigMap.
-- The operator's poller (every 5s) **detects** it, **stores** a normalized event,
-  sends a **Teams "HardwareFailureDetected" card**, and **patches the node-event
-  ConfigMap** so the controller cordons + drains that node.
-- Prints the persisted events from the API, then **re-injects the same signal** to
-  prove **deduplication** — `dedup_count` climbs but **no second action** fires.
-- Resets (clears signals, uncordons, rebalances).
+- Injects a **simulated IMDS Scheduled Event** of type `Reboot` (or `Redeploy`)
+  into the node-event ConfigMap with `source=DemoSimulator`.
+- The controller **detects** it, **cordons + drains** the affected node, and
+  **POSTs each transition** to the operator, which **stores** a normalized event.
+- Prints the persisted events from the operator API, then **re-POSTs the same
+  report** to prove **deduplication** — `dedup_count` climbs but **no second
+  action** fires and **no second row** is created.
+- Resets (clears the event, uncordons, rebalances).
 
 > The demo targets the node **not** running the operator, so the operator stays up
 > and its store keeps recording through the drain. (In production the operator
@@ -593,65 +594,20 @@ kubectl exec $op -n aks-maintenance-demo -- python -c "import urllib.request;pri
 kubectl port-forward -n aks-maintenance-demo svc/maintenance-operator 8080:8080
 # then open http://localhost:8080/  (auto-refreshes every 5s)
 ```
-The dashboard shows: subscriptions polled (#1), upcoming actions (#8), every
-normalized event with dedup counts (#3/#4), and the action-history audit trail.
-Because the store is on a **PVC**, it survives pod restarts — reschedule the
-operator and the history is still there.
+The dashboard shows: upcoming actions (#8), every tracked event with dedup counts
+(#3/#4), and the action-history audit trail. Because the store is on a **PVC**, it
+survives pod restarts — reschedule the operator and the history is still there.
 
 **How the simulation maps to the real world:**
-- **Real:** the poller calls Azure Resource Health across each configured
-  subscription; a genuine "Degraded/HW failure" flows through the identical
-  normalize → store → notify → cordon path.
-- **Simulated:** only the *signal source* is a ConfigMap instead of the ARM call,
-  so we can trigger a hardware event on demand. Everything downstream is real.
+- **Real:** the controller reads a genuine IMDS Scheduled Event from node-local
+  `169.254.169.254` and flows it through the identical detect → cordon/drain →
+  report → store path.
+- **Simulated:** only the *event source* is a ConfigMap instead of the IMDS
+  endpoint, so we can trigger a Reboot/Redeploy on demand. Everything downstream
+  is real.
 
-**Concerns addressed:** subscription-list polling (#1), VMSS→node mapping (#2),
-persistent normalized store + audit (#3), deduplication (#4), **hardware-failure
-notification (#6)**, and operator dashboard/API visibility (#8).
-
----
-
-## Step 8c-2 — False-positive guardrails (scale-in must NOT cordon)
-
-**Anticipate the smart question:** *"A VMSS node pool scales in and out with load.
-Won't a routine scale-in throw a `Degraded` and cause a false cordon?"* This is the
-real failure mode to design against, and the operator is built to reject it.
-
-Before any `Degraded` drives a cordon, the operator gates it:
-- **`REQUIRE_UNPLANNED`** — the `Degraded` must be `reasonType=Unplanned`. Planned
-  / scale activity is filtered out.
-- **`HARDWARE_SUMMARY_PATTERN`** — its summary must match a hardware-failure regex
-  (e.g. `VirtualMachinePossiblyDegradedDueToHardwareFailure`).
-- **`SKIP_AUTOSCALER_NODES`** — never fight the cluster-autoscaler: a node carrying
-  a `ToBeDeletedByClusterAutoscaler` / `DeletionCandidateOfClusterAutoscaler` taint
-  (or already gone) is skipped.
-- **`CONFIRM_POLLS`** (default 2) — the signal must persist across N polls before
-  acting, so a one-poll flap never triggers a cordon.
-
-`Unavailable` (a hard outage) is the strongest signal and bypasses the
-reasonType/summary corroboration — but still respects the autoscaler and debounce
-guards.
-
-```powershell
-.\demo-falsepositive.ps1
-```
-This injects a **scale-in-shaped** `Degraded` (`reasonType=Planned`,
-summary "Instance scaled in by cluster autoscaler"). Watch the operator **skip**
-it — the node stays `Ready` + schedulable and nothing lands in the store:
-
-```
-INFO Skipped signal rh-scalein-… : Degraded but reasonType='planned' (not Unplanned; likely scale/planned activity)
-  scale-in event in store: False
-  PASS: node stayed Ready + schedulable. A routine scale-in did NOT trigger a cordon.
-```
-
-Then contrast immediately with `.\demo-hardware.ps1` — same node, but a genuine
-`Unplanned` + hardware-summary signal, and the operator logs
-`Detected … after 2-poll confirmation` and drives the cordon. Same pipeline, two
-outcomes, decided entirely by the guardrails.
-
-**Concern addressed:** hardware-failure notification (#6) **without** false
-triggers from autoscaling — the exact real-world nuance customers ask about.
+**Concerns addressed:** VMSS→node mapping (#2), persistent normalized store +
+audit (#3), deduplication (#4), and operator dashboard/API visibility (#8).
 
 ---
 
@@ -720,7 +676,7 @@ cluster config for next time. `az aks start` brings it back.
 | Node status | `kubectl get nodes -o wide` |
 | Pod placement | `kubectl get pods -n aks-maintenance-demo -o wide` |
 | Run scenario | `.\demo.ps1` |
-| Run HW-failure scenario | `.\demo-hardware.ps1` |
+| Run IMDS Reboot/Redeploy scenario | `.\demo-reboot.ps1` (or `-EventType Redeploy`) |
 | Run lead-time scenario | `.\demo-leadtime.ps1 -WindowSeconds 120 -LeadSeconds 60` |
 | Operator dashboard | `kubectl port-forward -n aks-maintenance-demo svc/maintenance-operator 8080:8080` → http://localhost:8080/ |
 | Operator events API | `kubectl exec <operator-pod> -n aks-maintenance-demo -- python -c "import urllib.request;print(urllib.request.urlopen('http://localhost:8080/api/events').read().decode())"` |
@@ -745,8 +701,7 @@ cluster config for next time. `az aks start` brings it back.
 | Residual pod/network impact after redeploy | Step 5 — graceful eviction + PDB + recovery; networking flagged as a separate, parallel investigation |
 | No dedup / audit / history | Steps 6 & 8c — eventId dedup + JSON audit log + operator's persistent SQLite store & audit trail |
 | Wants ServiceNow / Google Chat notifications | Step 8b — controller → Logic App → Teams Adaptive Card (swap final hop for ServiceNow/Google Chat) |
-| Notification of **hardware failures** specifically | Step 8c — operator turns a Resource Health "Degraded" signal into a Teams card + auto cordon/drain |
-| Poll maintenance signals across prod/dev subscriptions | Step 8c — operator polls the `maintenance-subscriptions` list |
+| Notification of **maintenance actions** (Reboot/Redeploy) | Step 8b/8c — controller notifies on every transition; operator records + surfaces them |
 | Cordon at a configurable **lead time** before maintenance | Step 8d — controller holds in `Scheduled` and acts `leadSeconds` before `notBefore` |
 | Operator visibility / dashboard of upcoming actions | Step 8c — live dashboard + `/api/events`, `/api/upcoming` |
 | Poor Azure support / needs an SME + existing patterns | Whole demo — proven Scheduled Events pattern + working reference implementation |
@@ -756,12 +711,10 @@ cluster config for next time. `az aks start` brings it back.
 ## Production hardening (if asked "is this production-ready?")
 
 This is a **reference demo**, deliberately small — but it now covers the whole
-in-scope list (poll → map → persist → dedup → schedule → cordon/drain → notify →
+in-scope list (detect → map → persist → dedup → schedule → cordon/drain → notify →
 dashboard). For production you'd:
 - Package the controller **and operator** as versioned images in ACR (no
   `pip install` at pod start).
-- Swap the operator's ConfigMap signal source for the real **Resource Health
-  `availabilityStatuses`** call per subscription, using **workload identity**.
 - Move the operator's SQLite store to a managed backing (Azure SQL / Cosmos /
   Log Analytics) and run the operator on a dedicated **system nodepool**.
 - Add the real **ServiceNow + Google Chat** actions behind the same Logic App /
@@ -770,4 +723,5 @@ dashboard). For production you'd:
   Azure's own node auto-drain features, and compare against this Scheduled-Events
   approach.
 - Alert on **sudden** (no-notice) failures via Resource Health + PDB/spread, since
-  detection can't help when there's zero lead time.
+  detection can't help when there's zero lead time. (Resource Health is used for
+  awareness/alerting only — never as an automation trigger.)

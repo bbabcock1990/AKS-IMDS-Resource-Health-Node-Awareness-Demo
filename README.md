@@ -1,14 +1,7 @@
-# AKS IMDS + Resource Health Node-Awareness Demo
+# AKS Maintenance Demo
 
-This demo shows how an AKS workload can consume **Azure VM Scheduled Events**
-(via IMDS) and **Azure Resource Health**, and translate an actionable
-maintenance signal into graceful Kubernetes node protection — cordon, drain,
-notify, and recover — *before* the platform disrupts running pods.
-
-> **Placeholders:** the scripts and manifests ship with placeholder values —
-> subscription `00000000-0000-0000-0000-000000000000` and `you@example.com`.
-> Replace them with your own (or pass `-SubscriptionId` / `-RecipientEmail` to
-> the deploy scripts) before running.
+This demo shows how an AKS workload can consume Azure VM Scheduled Events and
+translate an actionable event into Kubernetes node protection.
 
 ## What the demo proves
 
@@ -27,15 +20,17 @@ Two components split the work:
 - Structured logs provide an audit trail and can be forwarded to a webhook.
 
 **`maintenance-operator`** (Deployment + PersistentVolume, the control plane):
-- Polls a **prod/dev subscription list** for Resource Health signals.
+- Receives a **state-transition report from every controller** (each node POSTs
+  to the operator's `/events` endpoint) — the fleet-wide aggregation point.
 - Keeps a **persistent normalized store + action-history audit trail** (SQLite
-  on a PVC) and **de-duplicates** repeat signals.
-- Turns a **hardware "Degraded/Unavailable"** signal into a Teams notification
-  and drives the controller to cordon/drain the affected node.
-- Applies **false-positive guardrails** so a routine VMSS scale-in cannot
-  trigger a cordon (reasonType, hardware-summary signature, autoscaler-taint
-  check, and an N-poll debounce). See _False-positive guardrails_ below.
-- Serves a **live dashboard + JSON API** (`/`, `/api/events`, `/api/upcoming`).
+  on a PVC) and **de-duplicates** repeated reports of the same event.
+- Serves a **live dashboard + JSON API** (`/`, `/api/events`, `/api/upcoming`,
+  `/api/history`) listing tracked and upcoming maintenance actions.
+
+> **Resource Health is intentionally not a signal source.** Resource Health
+> "Degraded" is reactive and fires on routine VMSS scale-in, so it is unsafe to
+> automate off. The only automation trigger is IMDS Scheduled Events (a typed,
+> push-ahead notice that never fires for autoscaler scale operations).
 
 ## Safety defaults
 
@@ -48,28 +43,9 @@ Two components split the work:
 These defaults allow the scenario to be demonstrated without forcing real
 Azure maintenance or disrupting system workloads.
 
-## False-positive guardrails
-
-A VMSS-backed AKS node pool scales in and out with load. A routine **scale-in**
-can briefly surface a Resource Health `Degraded` state — acting on it would
-cordon a healthy node for no reason. The operator therefore gates every
-`Degraded` signal before it drives a cordon (all knobs are env vars, default on):
-
-| Guard | Env var | What it does |
-| --- | --- | --- |
-| Reason type | `REQUIRE_UNPLANNED` | A `Degraded` must be `reasonType=Unplanned`. Planned / scale activity is filtered out. |
-| Summary signature | `HARDWARE_SUMMARY_PATTERN` | A `Degraded` summary must match a hardware-failure regex (e.g. `VirtualMachinePossiblyDegradedDueToHardwareFailure`). |
-| Autoscaler state | `SKIP_AUTOSCALER_NODES` | Never cordon a node the cluster-autoscaler is already retiring (autoscaler taint present, or node already gone). |
-| Debounce | `CONFIRM_POLLS` (default 2) | The signal must persist across N consecutive polls before any action. |
-
-`Unavailable` (a hard outage) is the strongest signal and bypasses the
-reasonType/summary checks, but still respects the autoscaler and debounce
-guards. Demonstrate this directly:
-
-```powershell
-.\demo-falsepositive.ps1   # scale-in Degraded -> SKIPPED, node stays schedulable
-.\demo-hardware.ps1        # Unplanned + hardware summary -> DOES cordon
-```
+Only actionable Scheduled Event types drive a cordon. The controller acts on
+`Redeploy` and `Reboot` and ignores everything else — so routine platform noise
+and autoscaler activity never trigger node protection.
 
 The controller installs its Python dependencies when the demo pod starts to
 avoid requiring a container registry. A production implementation should use
@@ -87,25 +63,11 @@ RBAC, alert retry/dead-letter handling, and a tested full-node drain policy.
 The subscription does not permit the lower-cost B-series SKUs. Delete the
 resource group after the demonstration to stop compute charges.
 
-## Prerequisites
-
-- Azure CLI (`az`) logged in to a subscription you can create an AKS cluster in
-- `kubectl` (the deploy script fetches credentials via `az aks get-credentials`)
-- PowerShell 7+ (scripts are `.ps1`)
-- An account with Teams for the optional notification pipeline
-
 ## Deploy
 
 ```powershell
-git clone https://github.com/bbabcock1990/AKS-IMDS-Resource-Health-Node-Awareness-Demo.git
-cd AKS-IMDS-Resource-Health-Node-Awareness-Demo
-.\deploy.ps1 -SubscriptionId "<your-subscription-id>"
-```
-
-One-time subscription prerequisite (needed for the Step 2 Resource Health call):
-
-```powershell
-az provider register --namespace Microsoft.ResourceHealth
+Set-Location "$env:USERPROFILE\OneDrive - Microsoft\Desktop\AKS-Maintance-Demo"
+.\deploy.ps1
 ```
 
 ## Run the demonstration
@@ -131,9 +93,9 @@ Use `.\status.ps1` to inspect the environment at any time.
 ## Advanced scenarios (closing the full in-scope list)
 
 ```powershell
-# Hardware-failure ("Degraded") via the operator: subscription poll -> detect ->
-# Teams notify -> cordon/drain -> persistent store -> dedup. See RUNBOOK Step 8c.
-.\demo-hardware.ps1
+# IMDS Reboot (or Redeploy) end to end, with the operator store: detect ->
+# cordon/drain -> persistent store -> dedup. See RUNBOOK Step 8c.
+.\demo-reboot.ps1                 # or: .\demo-reboot.ps1 -EventType Redeploy
 
 # Lead-time scheduling: controller holds in 'Scheduled' then acts leadSeconds
 # before the maintenance window. See RUNBOOK Step 8d.
@@ -147,9 +109,11 @@ kubectl port-forward -n aks-maintenance-demo svc/maintenance-operator 8080:8080
 ## Suggested customer talk track
 
 1. **Resource Health is not the action trigger.** A VMSS can report a transient
-   `Degraded` state during normal scale operations.
+   `Degraded` state during normal scale operations, so automating off it would
+   cordon healthy nodes. This demo deliberately excludes it.
 2. **Scheduled Events is the machine-actionable signal.** The controller polls
-   IMDS from every AKS node and filters events to the affected VM.
+   IMDS from every AKS node and acts only on actionable types (`Redeploy`,
+   `Reboot`), filtered to the affected VM.
 3. **AKS awareness is customer/controller logic.** Azure provides the VM event;
    the controller maps it to a Kubernetes node and performs cordon and eviction.
 4. **Notice is bounded.** Reboot/freeze commonly provide 15 minutes and redeploy

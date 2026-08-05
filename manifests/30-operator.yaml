@@ -4,57 +4,6 @@ metadata:
   name: maintenance-operator
   namespace: aks-maintenance-demo
 ---
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  name: maintenance-operator
-rules:
-  - apiGroups: [""]
-    resources: ["nodes"]
-    verbs: ["get", "list"]
-  - apiGroups: [""]
-    resources: ["configmaps"]
-    verbs: ["get", "list", "watch", "patch", "update"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: maintenance-operator
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: maintenance-operator
-subjects:
-  - kind: ServiceAccount
-    name: maintenance-operator
-    namespace: aks-maintenance-demo
----
-# Prod/dev subscription lists the operator "polls" (analogous to the real
-# subscription list helpers). In production these drive one Resource Health
-# query per subscription.
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: maintenance-subscriptions
-  namespace: aks-maintenance-demo
-data:
-  subscriptions.json: |
-    {
-      "prod": ["00000000-0000-0000-0000-000000000000"],
-      "dev": ["00000000-0000-0000-0000-000000000000"]
-    }
----
-# Resource Health-shaped signals the poller reads. Empty by default; the
-# hardware demo injects a "Degraded" signal here to simulate a real HW failure.
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: maintenance-resource-health
-  namespace: aks-maintenance-demo
-data:
-  signals.json: |
-    {"value": []}
----
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -92,20 +41,12 @@ spec:
           command:
             - /bin/sh
             - -c
-            - pip install --no-cache-dir requests kubernetes && python /app/maintenance_operator.py
+            - python /app/maintenance_operator.py
           env:
-            - name: POD_NAMESPACE
-              valueFrom:
-                fieldRef:
-                  fieldPath: metadata.namespace
-            - name: POLL_SECONDS
-              value: "5"
             - name: HTTP_PORT
               value: "8080"
             - name: DB_PATH
               value: /data/maintenance.db
-            - name: NOTIFICATION_WEBHOOK_URL
-              value: ""
           ports:
             - containerPort: 8080
           readinessProbe:

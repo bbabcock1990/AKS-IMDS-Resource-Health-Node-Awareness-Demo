@@ -280,15 +280,14 @@ function card(slide, x, y, w, h, opts) {
     if (sub) s.addText(sub, { x: x + 0.1, y: y + h * 0.5, w: w - 0.2, h: h * 0.5, fontFace: F.b, fontSize: 9, color: subCol || "C8D6E8", align: "center", valign: "top", margin: 0 });
   };
 
-  // Left: signal sources
+  // Left: signal source (Scheduled Events only)
   s.addText("AZURE PLATFORM", { x: M, y: 1.7, w: 2.6, h: 0.3, fontFace: F.h, fontSize: 10, bold: true, color: C.muted, charSpacing: 1.5, align: "center", margin: 0 });
-  box(M, 2.05, 2.6, 0.95, C.blue, C.blue, "Scheduled Events", "IMDS 169.254.169.254", C.white, "DEECF9");
-  box(M, 3.25, 2.6, 0.95, C.muted, C.muted, "Resource Health", "ARM availabilityStatuses", C.white, "EDEBE9");
+  box(M, 2.6, 2.6, 1.0, C.blue, C.blue, "Scheduled Events", "IMDS 169.254.169.254\nRedeploy / Reboot only", C.white, "DEECF9");
 
   // Middle: components
   s.addText("ON THE CLUSTER", { x: 4.35, y: 1.7, w: 4.6, h: 0.3, fontFace: F.h, fontSize: 10, bold: true, color: C.muted, charSpacing: 1.5, align: "center", margin: 0 });
   box(4.35, 2.05, 4.6, 1.15, C.navy2, C.navy2, "maintenance-controller  (DaemonSet)", "One pod per node  \u00B7  cordon + drain  \u00B7  lead-time", C.white, "C8D6E8");
-  box(4.35, 3.4, 4.6, 1.15, C.navy, C.navy, "maintenance-operator  (Deployment + PVC)", "poll  \u00B7  store  \u00B7  dedup  \u00B7  HW-notify  \u00B7  dashboard", C.white, "C8D6E8");
+  box(4.35, 3.4, 4.6, 1.15, C.navy, C.navy, "maintenance-operator  (Deployment + PVC)", "receive reports  \u00B7  store  \u00B7  dedup  \u00B7  dashboard", C.white, "C8D6E8");
 
   // Right: outcomes
   s.addText("ACTIONS & OUTPUTS", { x: 10.05, y: 1.7, w: 2.7, h: 0.3, fontFace: F.h, fontSize: 10, bold: true, color: C.muted, charSpacing: 1.5, align: "center", margin: 0 });
@@ -298,23 +297,22 @@ function card(slide, x, y, w, h, opts) {
 
   // arrows
   const arrow = (x1, y1, x2, y2, col) => s.addShape(pres.shapes.LINE, { x: x1, y: y1, w: x2 - x1, h: y2 - y1, line: { color: col || C.blue, width: 2, endArrowType: "triangle" } });
-  arrow(M + 2.6, 2.52, 4.35, 2.62, C.blue);       // sched -> controller
-  arrow(M + 2.6, 3.72, 4.35, 3.97, C.muted);      // RH -> operator
-  arrow(6.65, 3.4, 6.65, 3.2, C.yellow);          // operator -> controller (patch up)
-  s.addText("patch node-event CM", { x: 6.75, y: 3.16, w: 2.0, h: 0.3, fontFace: F.b, fontSize: 8.5, italic: true, color: C.muted, margin: 0 });
-  arrow(8.95, 2.55, 10.05, 2.45, C.navy2);        // controller -> nodes
-  arrow(8.95, 3.9, 10.05, 3.4, C.blue);           // operator -> logic app
-  arrow(8.95, 4.1, 10.05, 4.35, C.navy);          // operator -> store
+  arrow(M + 2.6, 3.05, 4.35, 2.65, C.blue);       // sched -> controller
+  arrow(6.65, 3.2, 6.65, 3.4, C.navy);            // controller -> operator (report down)
+  s.addText("POST /events (report)", { x: 6.75, y: 3.18, w: 2.1, h: 0.3, fontFace: F.b, fontSize: 8.5, italic: true, color: C.muted, margin: 0 });
+  arrow(8.95, 2.5, 10.05, 2.45, C.navy2);         // controller -> nodes
+  arrow(8.95, 2.9, 10.05, 3.4, C.blue);           // controller -> logic app
+  arrow(8.95, 4.0, 10.05, 4.35, C.navy);          // operator -> store
 
   // caption band
   card(s, M, 5.35, W - 2 * M, 1.25, { fill: C.panel, accent: C.blue });
   s.addText([
     { text: "How they cooperate:  ", options: { fontFace: F.h, fontSize: 12.5, bold: true, color: C.blueDk } },
     { text: "the ", options: { fontFace: F.b, fontSize: 12.5, color: C.ink } },
-    { text: "operator", options: { fontFace: F.h, fontSize: 12.5, bold: true, color: C.ink } },
-    { text: " is the control plane \u2014 it polls subscriptions, persists and de-duplicates events, detects hardware failures and fans out notifications. The ", options: { fontFace: F.b, fontSize: 12.5, color: C.ink } },
     { text: "controller", options: { fontFace: F.h, fontSize: 12.5, bold: true, color: C.ink } },
-    { text: " is the data plane \u2014 it runs on every node and performs the actual cordon and drain when its node is targeted.", options: { fontFace: F.b, fontSize: 12.5, color: C.ink } },
+    { text: " is the data plane \u2014 it runs on every node, reads IMDS Scheduled Events, performs the cordon and drain, notifies, and reports every transition to the operator. The ", options: { fontFace: F.b, fontSize: 12.5, color: C.ink } },
+    { text: "operator", options: { fontFace: F.h, fontSize: 12.5, bold: true, color: C.ink } },
+    { text: " is the control plane \u2014 it receives those reports, persists and de-duplicates them, and serves the store, API and dashboard. It polls nothing.", options: { fontFace: F.b, fontSize: 12.5, color: C.ink } },
   ], { x: M + 0.3, y: 5.4, w: W - 2 * M - 0.6, h: 1.15, margin: 0, valign: "middle" });
 })();
 
@@ -367,12 +365,12 @@ function card(slide, x, y, w, h, opts) {
   contentHeader(s, "Component 2 \u00B7 Control Plane", "maintenance-operator (Deployment + PVC)");
 
   const feats = [
-    [C.blue, "Subscription polling", "Sweeps the configured prod/dev subscription lists for maintenance signals \u2014 no per-node blind spots."],
+    [C.blue, "Fleet-wide report intake", "Every node\u2019s controller POSTs each state transition to /events \u2014 one aggregation point across the whole fleet, no polling."],
     [C.blueDk, "Persistent store", "Normalized events + full action history in SQLite on a PersistentVolume; survives pod restarts and reschedules."],
-    [C.green, "Deduplication", "Every event has a stable ID; repeats increment a counter instead of firing duplicate actions."],
-    [C.red, "Hardware-failure detection", "Flags HardwareDegraded / HardwareFailure, pushes a Teams alert and drives the cordon \u2014 gated so a VMSS scale-in never false-triggers."],
-    [C.cyan, "Operator dashboard + API", "Live HTML dashboard and JSON API on :8080 \u2014 upcoming actions, event log, health."],
-    [C.yellow, "Drives the controller", "Patches the shared node-event ConfigMap so the right node cordons/drains at the right time."],
+    [C.green, "Deduplication", "Every event has a stable ID; repeat reports increment a counter instead of creating duplicate records."],
+    [C.red, "IMDS-only \u2014 no false triggers", "Tracks only Redeploy / Reboot events the controllers act on. A VMSS scale-in never produces one, so no guardrails are needed."],
+    [C.cyan, "Operator dashboard + API", "Live HTML dashboard and JSON API on :8080 \u2014 upcoming actions, event log, dedup counts, audit trail."],
+    [C.yellow, "Zero cluster privileges", "A pure aggregation hub: it polls nothing and makes no Kubernetes API calls \u2014 no RBAC beyond its own pod."],
   ];
   const cw = (W - 2 * M - 0.8) / 3, ch = 2.05, gx = 0.4, gy = 0.35, x0 = M, y0 = 1.8;
   feats.forEach((f, i) => {
@@ -433,7 +431,7 @@ function card(slide, x, y, w, h, opts) {
   const concepts = [
     ["IMDS", "Instance Metadata Service \u2014 non-routable 169.254.169.254 endpoint every VM can query"],
     ["Scheduled Events", "Typed, machine-readable maintenance notices delivered before the action"],
-    ["Resource Health", "ARM view of a resource\u2019s availability \u2014 great for alerting, noisy for automation"],
+    ["Resource Health", "ARM view of a resource\u2019s availability \u2014 for alerting only; excluded as an automation trigger (noisy on scale-in)"],
     ["VMSS", "Virtual Machine Scale Set \u2014 the compute behind an AKS node pool"],
     ["Cordon", "Marks a node unschedulable; existing pods keep running"],
     ["Drain / Eviction API", "Gracefully evicts pods while respecting disruption limits"],
@@ -460,12 +458,12 @@ function card(slide, x, y, w, h, opts) {
   contentHeader(s, "Coverage", "Every in-scope requirement \u2014 addressed");
 
   const rows = [
-    ["Poll maintenance signals across subscriptions", "operator \u00B7 subscription poller"],
+    ["Poll maintenance signals (IMDS Scheduled Events)", "controller \u00B7 per-node IMDS"],
     ["Map VMSS instances \u2192 AKS clusters \u2192 node names", "controller + operator"],
     ["Persistent, normalized event store + audit history", "operator \u00B7 SQLite on PVC"],
     ["Deduplicate incoming events", "operator \u00B7 stable event IDs"],
     ["Schedule cordon at a configurable lead time", "controller \u00B7 leadSeconds"],
-    ["Notify on hardware failures", "operator \u2192 Logic App \u2192 Teams"],
+    ["Notify on maintenance actions (Reboot / Redeploy)", "controller \u2192 Logic App \u2192 Teams"],
     ["Outbound notifications (ServiceNow / Google Chat)", "Logic App \u00B7 swap last hop"],
     ["Operator visibility \u2014 dashboard / API", "operator \u00B7 :8080 + /api"],
   ];
@@ -501,10 +499,10 @@ function card(slide, x, y, w, h, opts) {
   contentHeader(s, "Live Demo", "What you\u2019ll see \u2014 run of show");
 
   const acts = [
-    ["Act 1", "Azure reality check", "Show the cluster, node pool = VMSS, and the live Scheduled Events / Resource Health endpoints.", C.blue],
+    ["Act 1", "Azure reality check", "Show the cluster, node pool = VMSS, and the live Scheduled Events endpoint on a node.", C.blue],
     ["Act 2", "Safe, graceful drain", "Inject a maintenance event; watch cordon \u2192 drain honoring PDBs. demo.ps1", C.blueDk],
     ["Act 3", "A real platform signal", "Read Scheduled Events straight from IMDS on a node.", C.navy2],
-    ["Act 4", "Hardware failure + alert", "HardwareFailure \u2192 cordon + Teams card fires. demo-hardware.ps1", C.red],
+    ["Act 4", "IMDS Reboot / Redeploy", "Reboot \u2192 cordon + drain + operator store + dedup. demo-reboot.ps1", C.red],
     ["Act 5", "Lead-time scheduling", "Event held in Scheduled state, then acts at window \u2212 lead. demo-leadtime.ps1", C.yellow],
     ["Act 6", "Operator dashboard", "Persisted events, dedup counters, upcoming actions at :8080.", C.green],
   ];
@@ -531,7 +529,7 @@ function card(slide, x, y, w, h, opts) {
   s.addShape(pres.shapes.RECTANGLE, { x: M, y: y0, w: cw, h: 0.7, fill: { color: C.greenOk }, line: { type: "none" } });
   s.addText("Production-identical (real)", { x: M + 0.3, y: y0, w: cw - 0.6, h: 0.7, fontFace: F.h, fontSize: 16, bold: true, color: C.white, valign: "middle", margin: 0 });
   s.addText([
-    "Scheduled Events & Resource Health API calls",
+    "Scheduled Events API calls (IMDS)",
     "Cordon via the Kubernetes API",
     "Drain via the Eviction API (honors PDBs)",
     "Logic App \u2192 Teams Adaptive Card delivery",
@@ -547,7 +545,6 @@ function card(slide, x, y, w, h, opts) {
   s.addText("Injected for the demo (simulated)", { x: bx + 0.3, y: y0, w: cw - 0.6, h: 0.7, fontFace: F.h, fontSize: 16, bold: true, color: C.white, valign: "middle", margin: 0 });
   s.addText([
     "The event content (we inject it via a ConfigMap instead of waiting hours for Azure to schedule real maintenance)",
-    "The subscription-poll source list",
     "The target node selection, so the demo is repeatable",
   ].map((t, i, arr) => ({ text: t, options: { fontFace: F.b, fontSize: 13, color: C.ink, bullet: { indent: 16 }, breakLine: true, paraSpaceAfter: i < arr.length - 1 ? 12 : 0 } })),
     { x: bx + 0.35, y: y0 + 0.95, w: cw - 0.7, h: 2.3, margin: 0, valign: "top" });
@@ -563,7 +560,7 @@ function card(slide, x, y, w, h, opts) {
   contentHeader(s, "Path to Production", "From demo to a supported service");
 
   const items = [
-    [C.blue, "Real signal sources", "Point the operator poller at live Resource Health per subscription; keep Scheduled Events for the automation trigger."],
+    [C.blue, "Immutable images", "Package the controller and operator as scanned container images in ACR \u2014 no pip-at-startup."],
     [C.blueDk, "Workload Identity", "Federated Entra identity for the pods \u2014 no secrets, least-privilege access to Azure APIs."],
     [C.green, "Managed store", "Swap SQLite/PVC for Azure SQL, Cosmos DB, or Log Analytics for durability and query."],
     [C.cyan, "System node pool", "Run the operator on a dedicated system pool so it is never evicted by the drain it triggered."],
@@ -589,7 +586,7 @@ function card(slide, x, y, w, h, opts) {
   const steps = [
     ["Share the reference", "We hand over the demo, runbook and this architecture as a starting point \u2014 you are not building from zero."],
     ["Point at a non-prod subscription", "Deploy read-only/observe mode against a dev cluster and validate signals on your real node pools."],
-    ["Flip the poller to live Resource Health", "Confirm what \u201CDegraded\u201D looks like in your environment and tune what we act on."],
+    ["Enable act mode", "Move the controller from observe to act on your validated node pools, at your chosen lead time."],
     ["Integrate your ITSM", "Wire the Logic App to ServiceNow / Google Chat for real incident and channel notifications."],
     ["Investigate residual pod networking in parallel", "Provide an SME to root-cause the post-redeploy network issue \u2014 the deeper original concern."],
   ];
