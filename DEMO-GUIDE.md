@@ -182,14 +182,18 @@ makes draining *safe* rather than an outage.
 ⌨️ **DO:**
 ```powershell
 # Show the safety-relevant lines of the controller
-kubectl get configmap maintenance-controller-code -n aks-maintenance-demo -o jsonpath='{.data.controller\.py}' | Select-String -Pattern "ACTIONABLE_EVENTS|LIVE_ACTION_MODE|def handle_event|def cordon_node|def drain_demo_workload|create_namespaced_pod_eviction|acknowledge_live_event"
+kubectl get configmap maintenance-controller-code -n aks-maintenance-demo -o jsonpath='{.data.controller\.py}' | Select-String -Pattern "LIVE_ACTION_MODE|def handle_event|def cordon_node|def drain_demo_workload|create_namespaced_pod_eviction|acknowledge_live_event"
+
+# ACTIONABLE_EVENTS is a multi-line set -- print it with its members
+kubectl get configmap maintenance-controller-code -n aks-maintenance-demo -o jsonpath='{.data.controller\.py}' | Select-String -Pattern "ACTIONABLE_EVENTS" -Context 0,3
 
 # Show how it's configured (env vars)
 kubectl set env daemonset/maintenance-controller -n aks-maintenance-demo --list | Select-String "LIVE_ACTION_MODE|LEAD_SECONDS|WEBHOOK|STORE|POLL_SECONDS"
 ```
 
-👀 **POINT AT:** `LIVE_ACTION_MODE=observe` (the safety switch) and
-`ACTIONABLE_EVENTS = {Reboot, Redeploy}`.
+👀 **POINT AT:** `LIVE_ACTION_MODE=observe` (the safety switch) and the
+`ACTIONABLE_EVENTS` set, whose members are `"Reboot"` and `"Redeploy"` (the
+`-Context 0,3` prints the opening line plus the two members and the closing brace).
 
 🧠 **HOW IT WORKS (walk through this):** Each controller pod runs a 2-second loop
 (`POLL_SECONDS`). On every tick it:
