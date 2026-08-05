@@ -130,6 +130,33 @@ The controller POSTs a structured event to `NOTIFICATION_WEBHOOK_URL` at every
 state transition. A ready-made **Teams** pipeline (Azure Logic App → Adaptive
 Card) is included and stands in for ServiceNow / Google Chat.
 
+**How an IMDS event becomes a Teams card (end-to-end):**
+
+1. Azure schedules host maintenance and publishes a typed `Reboot`/`Redeploy`
+   notice to the VM's **IMDS Scheduled Events** endpoint.
+2. The per-node `maintenance-controller` polls node-local IMDS every
+   `POLL_SECONDS` (default 2s) and filters events to its own VM via `Resources`.
+3. `handle_event()` gates the event: it must be `Scheduled` **and** an actionable
+   type (`Reboot`/`Redeploy`). Anything else is `Observed`-only, so autoscaler
+   scale-in — which never appears in Scheduled Events — cannot raise a card.
+4. On each lifecycle transition (`Detected → Cordoned → Drained →
+   Acknowledged`/`SimulatedComplete`), `notify()` builds a JSON payload and
+   `POST`s it to both `NOTIFICATION_WEBHOOK_URL` (Teams) and `EVENT_STORE_URL`
+   (operator store).
+5. The Logic App HTTP trigger receives the payload, composes an **Adaptive Card**
+   (State / Event Type / Node / Source / Event ID / Detail), and — if a Teams
+   `Workflows` webhook URL is configured — POSTs the card to the channel.
+
+```
+Azure host → IMDS Scheduled Events → controller poll (2s) → filter Reboot/Redeploy
+   → handle_event → notify() → Logic App → Adaptive Card → Teams Workflows webhook
+```
+
+> A Teams card fires **once per state transition**, and only for IMDS
+> `Reboot`/`Redeploy` events. Two independent toggles gate delivery:
+> `NOTIFICATION_WEBHOOK_URL` (controller → Logic App) and the Logic App's
+> `teamsWebhookUrl` (Logic App → channel). Either can stay blank for a dry run.
+
 **This is wired automatically** — `deploy.ps1` calls `deploy-notifications.ps1`,
 so once the environment is up, `demo.ps1` fires notifications on its own with no
 extra step.
