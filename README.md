@@ -49,11 +49,10 @@ Azure host maintenance
    → report to operator store + notification webhook
 ```
 
-**Why IMDS Scheduled Events, and not Resource Health:** Scheduled Events is a
-typed, ahead-of-time notice of a specific action on a specific VM. Resource
-Health "Degraded" is reactive and can also fire during normal autoscaler
-scale-in, so acting on it would cordon healthy nodes. This demo uses Scheduled
-Events as its only trigger.
+**Why IMDS Scheduled Events:** Scheduled Events is a typed, ahead-of-time notice
+of a specific action (`Reboot` / `Redeploy`) on a specific VM. Azure never emits
+one for autoscaler scale-in or other routine VMSS activity, so acting on it can't
+cordon healthy nodes. This demo uses Scheduled Events as its only trigger.
 
 ## What it accomplishes
 
@@ -94,8 +93,8 @@ Set-Location AKS-IMDS-Resource-Health-Node-Awareness-Demo
 
 ## Run the demo
 
-> For a full presenter walkthrough with per-step talk tracks, see
-> **`DEMO-RUNBOOK.md`**.
+> For a full presenter walkthrough with per-step talk tracks *and* the command
+> reference, see **`DEMO-GUIDE.md`**.
 
 ```powershell
 .\demo.ps1
@@ -151,7 +150,7 @@ extra step.
 ```
 
 To target ServiceNow or Google Chat, swap the final action in
-`notifications\teams-logicapp.json`. See `DEMO-RUNBOOK.md` **Step 8b**.
+`notifications\teams-logicapp.json`. See `DEMO-GUIDE.md` **Step 8**.
 
 ## Cleanup
 

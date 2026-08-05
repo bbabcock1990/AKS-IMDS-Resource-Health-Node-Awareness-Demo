@@ -4,9 +4,9 @@
 
 .DESCRIPTION
     The only automation trigger in this demo is an Azure IMDS Scheduled Event of
-    an actionable type (Redeploy / Reboot). Resource Health is deliberately NOT a
-    signal source -- it is reactive and fires on routine VMSS scale-in, so it is
-    unsafe to automate off.
+    an actionable type (Redeploy / Reboot). Azure never emits one of these for
+    autoscaler scale-in or other routine VMSS activity, so acting on it can never
+    cordon a healthy node.
 
     This script injects a simulated IMDS *Reboot* Scheduled Event for one node
     into the maintenance-demo-events ConfigMap (the controller treats a non-IMDS

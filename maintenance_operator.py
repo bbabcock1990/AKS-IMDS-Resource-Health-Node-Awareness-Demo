@@ -17,12 +17,10 @@ reports, so the fleet-wide picture lives in one place:
                                        upcoming actions, tracked events and the
                                        audit trail.
 
-Resource Health is intentionally NOT a signal source here. Resource Health
-"Degraded" is reactive and noisy -- it fires on routine VMSS scale-in -- so it is
-unsafe to automate off. The only automation trigger is IMDS Scheduled Events
-(a typed, push-ahead notice that never fires for autoscaler scale operations),
-handled by the controller; this operator simply aggregates what the controller
-reports.
+The only automation trigger is IMDS Scheduled Events -- a typed, push-ahead
+notice of an actionable maintenance action (Redeploy / Reboot) that never fires
+for autoscaler scale operations -- handled by the controller; this operator
+simply aggregates what the controller reports.
 """
 
 import json
