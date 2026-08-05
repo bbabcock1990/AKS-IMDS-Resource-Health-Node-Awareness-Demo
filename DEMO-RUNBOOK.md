@@ -38,7 +38,7 @@ Together they cover the full in-scope list: detect (IMDS) → map → persist �
 
 ## Environment
 
-- Subscription: `00000000-0000-0000-0000-000000000000`
+- Subscription: `<your-subscription-id>` (the scripts default to your current `az` context)
 - Resource group: `aks-maintenance-demo-rg`
 - Cluster: `aks-maintenance-demo` (West US 2, 2 × `Standard_D2als_v7`, K8s 1.35)
 - Node resource group (the VMSS lives here): `MC_aks-maintenance-demo-rg_aks-maintenance-demo_westus2`
@@ -65,7 +65,7 @@ Without this, Step 2's Resource Health call returns
 
 **Run:**
 ```powershell
-az account set --subscription 00000000-0000-0000-0000-000000000000
+az account set --subscription <your-subscription-id>   # or omit to use your current az context
 az aks get-credentials --resource-group aks-maintenance-demo-rg --name aks-maintenance-demo --overwrite-existing
 kubectl get nodes
 ```
@@ -485,8 +485,9 @@ transition (Detected/Cordoned/Drained/SimulatedComplete).
 This POSTs a sample controller-shaped event to the Logic App; a card DM should
 arrive in Teams within a few seconds. Confirm the action fired:
 ```powershell
-$run = az rest --method get --url "https://management.azure.com/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/aks-maintenance-demo-rg/providers/Microsoft.Logic/workflows/aks-maint-teams-notify/runs?api-version=2019-05-01" --query "value[0].name" -o tsv
-az rest --method get --url "https://management.azure.com/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/aks-maintenance-demo-rg/providers/Microsoft.Logic/workflows/aks-maint-teams-notify/runs/$run/actions?api-version=2019-05-01" --query "value[].{action:name,status:properties.status}" -o table
+$subId = az account show --query id -o tsv
+$run = az rest --method get --url "https://management.azure.com/subscriptions/$subId/resourceGroups/aks-maintenance-demo-rg/providers/Microsoft.Logic/workflows/aks-maint-teams-notify/runs?api-version=2019-05-01" --query "value[0].name" -o tsv
+az rest --method get --url "https://management.azure.com/subscriptions/$subId/resourceGroups/aks-maintenance-demo-rg/providers/Microsoft.Logic/workflows/aks-maint-teams-notify/runs/$run/actions?api-version=2019-05-01" --query "value[].{action:name,status:properties.status}" -o table
 ```
 `Post_card_to_Teams` = **Succeeded** means the DM was delivered.
 
@@ -512,8 +513,9 @@ you don't want to run a full drain, use `.\test-notification.ps1`.
 
 **See the audit/run history (great screen-share):**
 ```powershell
+$subId = az account show --query id -o tsv
 az rest --method get `
-  --url "https://management.azure.com/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/aks-maintenance-demo-rg/providers/Microsoft.Logic/workflows/aks-maint-teams-notify/runs?api-version=2019-05-01" `
+  --url "https://management.azure.com/subscriptions/$subId/resourceGroups/aks-maintenance-demo-rg/providers/Microsoft.Logic/workflows/aks-maint-teams-notify/runs?api-version=2019-05-01" `
   --query "value[:5].{start:properties.startTime, status:properties.status}" -o table
 ```
 Or in the portal: **Logic App `aks-maint-teams-notify` → Runs history** — each run

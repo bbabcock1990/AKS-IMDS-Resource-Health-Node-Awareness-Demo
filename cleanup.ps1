@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$SubscriptionId = "00000000-0000-0000-0000-000000000000",
+    [string]$SubscriptionId = (az account show --query id -o tsv),
     [string]$ResourceGroup = "aks-maintenance-demo-rg"
 )
 

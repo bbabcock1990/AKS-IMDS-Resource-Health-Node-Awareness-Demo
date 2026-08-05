@@ -26,7 +26,7 @@
 ```powershell
 cd "$env:USERPROFILE\OneDrive - Microsoft\Desktop\AKS-Maintance-Demo"
 $env:PATH = "$env:USERPROFILE\.azure-kubectl;$env:USERPROFILE\.azure-kubelogin;$env:PATH"
-az account set --subscription 00000000-0000-0000-0000-000000000000
+az account set --subscription <your-subscription-id>   # or omit to use your current az context
 az aks get-credentials -g aks-maintenance-demo-rg -n aks-maintenance-demo --overwrite-existing
 kubectl get nodes                              # both Ready
 kubectl get pods -n aks-maintenance-demo -o wide   # controller 2/2, operator 1/1, app 4/4
