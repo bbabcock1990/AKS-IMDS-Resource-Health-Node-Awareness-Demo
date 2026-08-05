@@ -32,6 +32,9 @@ Two components split the work:
   on a PVC) and **de-duplicates** repeat signals.
 - Turns a **hardware "Degraded/Unavailable"** signal into a Teams notification
   and drives the controller to cordon/drain the affected node.
+- Applies **false-positive guardrails** so a routine VMSS scale-in cannot
+  trigger a cordon (reasonType, hardware-summary signature, autoscaler-taint
+  check, and an N-poll debounce). See _False-positive guardrails_ below.
 - Serves a **live dashboard + JSON API** (`/`, `/api/events`, `/api/upcoming`).
 
 ## Safety defaults
@@ -44,6 +47,29 @@ Two components split the work:
 
 These defaults allow the scenario to be demonstrated without forcing real
 Azure maintenance or disrupting system workloads.
+
+## False-positive guardrails
+
+A VMSS-backed AKS node pool scales in and out with load. A routine **scale-in**
+can briefly surface a Resource Health `Degraded` state — acting on it would
+cordon a healthy node for no reason. The operator therefore gates every
+`Degraded` signal before it drives a cordon (all knobs are env vars, default on):
+
+| Guard | Env var | What it does |
+| --- | --- | --- |
+| Reason type | `REQUIRE_UNPLANNED` | A `Degraded` must be `reasonType=Unplanned`. Planned / scale activity is filtered out. |
+| Summary signature | `HARDWARE_SUMMARY_PATTERN` | A `Degraded` summary must match a hardware-failure regex (e.g. `VirtualMachinePossiblyDegradedDueToHardwareFailure`). |
+| Autoscaler state | `SKIP_AUTOSCALER_NODES` | Never cordon a node the cluster-autoscaler is already retiring (autoscaler taint present, or node already gone). |
+| Debounce | `CONFIRM_POLLS` (default 2) | The signal must persist across N consecutive polls before any action. |
+
+`Unavailable` (a hard outage) is the strongest signal and bypasses the
+reasonType/summary checks, but still respects the autoscaler and debounce
+guards. Demonstrate this directly:
+
+```powershell
+.\demo-falsepositive.ps1   # scale-in Degraded -> SKIPPED, node stays schedulable
+.\demo-hardware.ps1        # Unplanned + hardware summary -> DOES cordon
+```
 
 The controller installs its Python dependencies when the demo pod starts to
 avoid requiring a container registry. A production implementation should use

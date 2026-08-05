@@ -611,6 +611,50 @@ notification (#6)**, and operator dashboard/API visibility (#8).
 
 ---
 
+## Step 8c-2 — False-positive guardrails (scale-in must NOT cordon)
+
+**Anticipate the smart question:** *"A VMSS node pool scales in and out with load.
+Won't a routine scale-in throw a `Degraded` and cause a false cordon?"* This is the
+real failure mode to design against, and the operator is built to reject it.
+
+Before any `Degraded` drives a cordon, the operator gates it:
+- **`REQUIRE_UNPLANNED`** — the `Degraded` must be `reasonType=Unplanned`. Planned
+  / scale activity is filtered out.
+- **`HARDWARE_SUMMARY_PATTERN`** — its summary must match a hardware-failure regex
+  (e.g. `VirtualMachinePossiblyDegradedDueToHardwareFailure`).
+- **`SKIP_AUTOSCALER_NODES`** — never fight the cluster-autoscaler: a node carrying
+  a `ToBeDeletedByClusterAutoscaler` / `DeletionCandidateOfClusterAutoscaler` taint
+  (or already gone) is skipped.
+- **`CONFIRM_POLLS`** (default 2) — the signal must persist across N polls before
+  acting, so a one-poll flap never triggers a cordon.
+
+`Unavailable` (a hard outage) is the strongest signal and bypasses the
+reasonType/summary corroboration — but still respects the autoscaler and debounce
+guards.
+
+```powershell
+.\demo-falsepositive.ps1
+```
+This injects a **scale-in-shaped** `Degraded` (`reasonType=Planned`,
+summary "Instance scaled in by cluster autoscaler"). Watch the operator **skip**
+it — the node stays `Ready` + schedulable and nothing lands in the store:
+
+```
+INFO Skipped signal rh-scalein-… : Degraded but reasonType='planned' (not Unplanned; likely scale/planned activity)
+  scale-in event in store: False
+  PASS: node stayed Ready + schedulable. A routine scale-in did NOT trigger a cordon.
+```
+
+Then contrast immediately with `.\demo-hardware.ps1` — same node, but a genuine
+`Unplanned` + hardware-summary signal, and the operator logs
+`Detected … after 2-poll confirmation` and drives the cordon. Same pipeline, two
+outcomes, decided entirely by the guardrails.
+
+**Concern addressed:** hardware-failure notification (#6) **without** false
+triggers from autoscaling — the exact real-world nuance customers ask about.
+
+---
+
 ## Step 8d — Lead-time scheduling (cordon *ahead* of the window)
 
 the customer asked for cordon **"at a configurable lead time before maintenance."** The

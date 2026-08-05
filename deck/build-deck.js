@@ -370,7 +370,7 @@ function card(slide, x, y, w, h, opts) {
     [C.blue, "Subscription polling", "Sweeps the configured prod/dev subscription lists for maintenance signals \u2014 no per-node blind spots."],
     [C.blueDk, "Persistent store", "Normalized events + full action history in SQLite on a PersistentVolume; survives pod restarts and reschedules."],
     [C.green, "Deduplication", "Every event has a stable ID; repeats increment a counter instead of firing duplicate actions."],
-    [C.red, "Hardware-failure detection", "Flags HardwareDegraded / HardwareFailure, pushes a Teams alert and drives the controller to cordon."],
+    [C.red, "Hardware-failure detection", "Flags HardwareDegraded / HardwareFailure, pushes a Teams alert and drives the cordon \u2014 gated so a VMSS scale-in never false-triggers."],
     [C.cyan, "Operator dashboard + API", "Live HTML dashboard and JSON API on :8080 \u2014 upcoming actions, event log, health."],
     [C.yellow, "Drives the controller", "Patches the shared node-event ConfigMap so the right node cordons/drains at the right time."],
   ];

@@ -13,7 +13,11 @@ Closes the gaps the per-node controller leaves open by acting as a small
   #4 Deduplication                   -> incoming signals/transitions are de-duped
                                        against stored records.
   #6 Hardware-failure detection      -> Degraded/Unavailable signals fire a Teams
-                                       notification and cordon/drain the node.
+                                       notification and cordon/drain the node,
+                                       gated by guardrails (reasonType, hardware
+                                       summary, autoscaler state, N-poll debounce)
+                                       so a routine VMSS scale-in cannot false-
+                                       trigger a cordon.
   #8 Operator visibility             -> an HTTP dashboard + JSON API listing
                                        upcoming actions, events and dedup counts.
 
@@ -28,6 +32,7 @@ persistence, notification and cordon/drain wiring are identical either way.
 import json
 import logging
 import os
+import re
 import sqlite3
 import threading
 import time
@@ -53,6 +58,40 @@ SUBSCRIPTIONS_CONFIGMAP = os.getenv("SUBSCRIPTIONS_CONFIGMAP", "maintenance-subs
 SIGNALS_CONFIGMAP = os.getenv("SIGNALS_CONFIGMAP", "maintenance-resource-health")
 DRIVE_CORDON = os.getenv("DRIVE_CORDON", "true").lower() == "true"
 DEGRADED_STATES = {"Degraded", "Unavailable"}
+
+# --------------------------------------------------------------------------- #
+# False-positive guardrails
+# --------------------------------------------------------------------------- #
+# A VMSS-backed AKS node pool scales in/out with load, and a routine scale-in can
+# surface a transient Resource Health "Degraded". Acting on that would cordon a
+# node for no reason. These guards ensure a "Degraded" only drives a cordon when
+# it genuinely looks like host hardware trouble -- never for scale activity.
+#
+#   REQUIRE_UNPLANNED  - a "Degraded" must carry reasonType=Unplanned. Routine
+#                        scale-in / planned work is filtered out. ("Unavailable"
+#                        -- a hard outage -- bypasses this stronger-signal check.)
+#   HARDWARE_SUMMARY_PATTERN - a "Degraded" summary must match this regex (e.g.
+#                        the VirtualMachinePossiblyDegradedDueToHardwareFailure
+#                        wording). Empty string disables the check.
+#   SKIP_AUTOSCALER_NODES - skip a node the cluster-autoscaler is already scaling
+#                        in (autoscaler taint present, or node already gone).
+#   CONFIRM_POLLS      - require the signal to persist across N consecutive polls
+#                        before acting, so a one-poll flap never triggers a cordon.
+REQUIRE_UNPLANNED = os.getenv("REQUIRE_UNPLANNED", "true").lower() == "true"
+HARDWARE_SUMMARY_PATTERN = os.getenv(
+    "HARDWARE_SUMMARY_PATTERN", r"hardware|degraded due to|unhealthy host"
+)
+SKIP_AUTOSCALER_NODES = os.getenv("SKIP_AUTOSCALER_NODES", "true").lower() == "true"
+CONFIRM_POLLS = int(os.getenv("CONFIRM_POLLS", "2"))
+AUTOSCALER_TAINTS = {
+    "ToBeDeletedByClusterAutoscaler",
+    "DeletionCandidateOfClusterAutoscaler",
+}
+
+# In-memory debounce + skip-log throttle state (operator is a single replica).
+_pending = {}          # event_id -> consecutive actionable sightings
+_skip_last = {}        # event_id -> last time we logged a skip (epoch seconds)
+_gate_lock = threading.Lock()
 
 try:
     config.load_incluster_config()
@@ -281,6 +320,74 @@ def normalize_signal(signal, subscription, environment):
     }
 
 
+def node_is_scaling_down(node_name):
+    """True if the cluster-autoscaler is already retiring this node (or it is
+    gone). Such a node must not be cordoned by us -- it is a scale-in, not a
+    hardware fault."""
+    if not SKIP_AUTOSCALER_NODES or core is None or not node_name:
+        return False
+    try:
+        node = core.read_node(node_name)
+    except ApiException as exc:
+        if exc.status == 404:
+            return True  # already removed -> scale-in, nothing for us to protect
+        logging.warning("Could not read node %s: %s", node_name, exc.reason)
+        return False
+    taints = (node.spec.taints or []) if node.spec else []
+    return any(taint.key in AUTOSCALER_TAINTS for taint in taints)
+
+
+def signal_gate(props, availability, node_name):
+    """Decide whether a degraded/unavailable signal is a genuine host-hardware
+    problem worth cordoning for. Returns (should_act, reason)."""
+    if availability == "Unavailable":
+        # Hard outage: the strongest signal. Skip reasonType/summary corroboration
+        # but still never fight the autoscaler.
+        if node_is_scaling_down(node_name):
+            return False, "node is being scaled in by cluster-autoscaler"
+        return True, "ok"
+
+    # availability == "Degraded": the ambiguous one that also fires on scale-in.
+    reason_type = str(props.get("reasonType", "")).lower()
+    if REQUIRE_UNPLANNED and reason_type != "unplanned":
+        return False, f"Degraded but reasonType='{reason_type or 'unset'}' (not Unplanned; likely scale/planned activity)"
+
+    summary = str(props.get("summary", "") or props.get("reasonType", ""))
+    if HARDWARE_SUMMARY_PATTERN and not re.search(HARDWARE_SUMMARY_PATTERN, summary, re.I):
+        return False, "Degraded but summary lacks a hardware-failure signature"
+
+    if node_is_scaling_down(node_name):
+        return False, "node is being scaled in by cluster-autoscaler"
+
+    return True, "ok"
+
+
+def confirm_persisted(event_id):
+    """Debounce: only return True once a signal has been seen CONFIRM_POLLS times
+    in a row, so a single transient poll cannot trigger a cordon."""
+    with _gate_lock:
+        seen = _pending.get(event_id, 0) + 1
+        _pending[event_id] = seen
+    return seen >= CONFIRM_POLLS, seen
+
+
+def clear_pending(event_id):
+    with _gate_lock:
+        _pending.pop(event_id, None)
+
+
+def log_skip(event_id, node, reason, throttle_seconds=60):
+    """Log a skipped signal, throttled so a persistent benign Degraded does not
+    spam the log every poll."""
+    now = time.time()
+    with _gate_lock:
+        last = _skip_last.get(event_id, 0)
+        if now - last < throttle_seconds:
+            return
+        _skip_last[event_id] = now
+    logging.info("Skipped signal %s on %s: %s", event_id, node or "unmapped", reason)
+
+
 def poll_once():
     subscriptions = get_subscriptions()
     signals_doc = read_configmap_json(SIGNALS_CONFIGMAP, "signals.json") or {}
@@ -291,26 +398,49 @@ def poll_once():
         for sub in subs
     }
 
+    seen_ids = set()
     total = 0
     for signal in signals:
         subscription = signal.get("subscription") or (
             next(iter(sub_index), "") if sub_index else ""
         )
         environment = sub_index.get(subscription, signal.get("environment", "unknown"))
-        availability = signal.get("properties", signal).get("availabilityState", "Available")
+        props = signal.get("properties", signal)
+        availability = props.get("availabilityState", "Available")
         if availability not in DEGRADED_STATES:
             continue
-        total += 1
+
         event = normalize_signal(signal, subscription, environment)
+        seen_ids.add(event["eventId"])
+        node = event["targetNode"]
+
+        # Guardrails: reject scale-in noise before it can drive a cordon.
+        should_act, reason = signal_gate(props, availability, node)
+        if not should_act:
+            log_skip(event["eventId"], node, reason)
+            clear_pending(event["eventId"])
+            continue
+
+        # Debounce: require the signal to persist before acting.
+        confirmed, sightings = confirm_persisted(event["eventId"])
+        if not confirmed:
+            logging.info(
+                "Signal %s on %s pending confirmation (%d/%d polls)",
+                event["eventId"], node or "unmapped", sightings, CONFIRM_POLLS,
+            )
+            continue
+
+        total += 1
         if not upsert_event(event):
             continue  # already processed -> dedup (#4)
 
         logging.info(
-            "Detected %s on %s (sub=%s, env=%s)",
+            "Detected %s on %s (sub=%s, env=%s) after %d-poll confirmation",
             event["eventType"],
-            event["targetNode"] or "unmapped",
+            node or "unmapped",
             subscription,
             environment,
+            CONFIRM_POLLS,
         )
         notify(
             event,
@@ -318,11 +448,19 @@ def poll_once():
             f"{availability} reported by Resource Health "
             f"(sub={subscription}, env={environment}).",
         )
-        if DRIVE_CORDON and event["targetNode"]:
+        if DRIVE_CORDON and node:
             try:
                 drive_cordon(event)
             except ApiException as exc:
                 logging.error("Failed to drive cordon: %s", exc.reason)
+
+    # Forget debounce/skip state for signals that are no longer present, so a
+    # signal that clears and later returns must re-confirm from scratch.
+    with _gate_lock:
+        for stale in [k for k in _pending if k not in seen_ids]:
+            _pending.pop(stale, None)
+        for stale in [k for k in _skip_last if k not in seen_ids]:
+            _skip_last.pop(stale, None)
     return total
 
 
