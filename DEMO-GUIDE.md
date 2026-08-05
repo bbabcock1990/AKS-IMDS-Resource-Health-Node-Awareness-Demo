@@ -45,6 +45,29 @@ The whole demo is one loop: **Detect → Cordon → Drain → (Acknowledge) → 
 Together they cover the full in-scope list: detect (IMDS) → map → persist → dedup
 → schedule → cordon/drain → notify → visualize.
 
+```mermaid
+flowchart LR
+    HOST["Azure host maintenance<br/>(reboot / redeploy)"]
+
+    subgraph N1["AKS node · VMSS instance"]
+        I1["IMDS Scheduled Events<br/>169.254.169.254"]
+        CTL1["maintenance-controller<br/>DaemonSet pod (per node)"]
+    end
+
+    OP["maintenance-operator<br/>Deployment + PVC<br/>SQLite store + dashboard"]
+    LA["Azure Logic App<br/>Adaptive Card"]
+    TEAMS["Microsoft Teams"]
+    USER["You · browser :8080"]
+
+    HOST --> I1
+    I1 -->|poll 2s| CTL1
+    CTL1 -->|cordon / drain| N1
+    CTL1 -->|state change| OP
+    CTL1 -->|state change| LA
+    LA --> TEAMS
+    OP -->|dashboard + API| USER
+```
+
 ---
 
 ## Environment
@@ -424,12 +447,24 @@ webhooks, no secrets in the payload.
 during the demo. It exists as a separate script so you can (re)wire the destination
 later without rebuilding the cluster:
 ```powershell
-# Full environment (cluster + controller + operator + notifications) in one shot:
+# Full environment (cluster + controller + operator + notifications) in one shot.
+# The DM recipient defaults to your signed-in user (az account show -> user.name):
 .\deploy.ps1
 
+# Send the card to someone else -- pass -RecipientEmail (works on either script):
+.\deploy.ps1 -RecipientEmail "you@yourdomain.com"
+
 # Or, if the cluster already exists and you just want to (re)wire notifications:
-.\deploy-notifications.ps1 -RecipientEmail "you@example.com"
+.\deploy-notifications.ps1 -RecipientEmail "you@yourdomain.com"
 ```
+
+> **Where the recipient email is set:** the Logic App posts the card to
+> `@parameters('recipientEmail')` (`notifications\teams-logicapp-connector.json`).
+> That parameter is supplied by `deploy-notifications.ps1 -RecipientEmail`, which
+> **defaults to your currently signed-in user** when omitted, so a plain
+> `.\deploy.ps1` DMs the card to *you*. Override it any time by re-running
+> `.\deploy-notifications.ps1 -RecipientEmail "<upn>"`.
+
 Either path deploys a **Teams API connection** (`aks-maint-teams`) + a **Consumption
 Logic App** (`aks-maint-teams-notify`), reads the trigger's secured **callback URL**,
 and sets `NOTIFICATION_WEBHOOK_URL` on the controller DaemonSet so every pod POSTs its
@@ -591,6 +626,36 @@ Invoke-RestMethod http://localhost:8080/api/upcoming
 🧠 **HOW IT WORKS:** the store sits on a **PersistentVolume** (Azure Disk via the CSI
 driver); the Deployment can reschedule and the data follows. Because it's an API, it
 drops straight into Grafana, Power BI, or your existing NOC tooling.
+
+**How the dashboard is populated (say this if they ask "where do these numbers come
+from?"):** the operator *only listens* — it polls nothing and makes no Kubernetes
+calls. Each controller `POST`s one JSON report per state change to `/events`; the
+operator writes it into two SQLite tables and the page auto-refreshes every 5s.
+
+```mermaid
+flowchart LR
+    POST["controller POST /events<br/>one per state change"] --> ING["ingest_report()"]
+    ING -->|upsert by eventId| EV[("events table<br/>1 row per eventId<br/>last_state · dedup_count")]
+    ING -->|append| HI[("history table<br/>1 row per transition")]
+    EV --> C1["card: events tracked"]
+    EV --> C2["card: upcoming actions"]
+    EV --> C3["card: duplicate reports collapsed"]
+    HI --> C4["card: history rows"]
+```
+
+- **`events` table** = the *current* state of each unique `eventId` (repeats update
+  the row and bump `dedup_count` — they never add rows). **`history` table** = an
+  append-only audit trail, one row per transition.
+- **The four cards:** *events tracked* = rows in `events`; *upcoming actions* =
+  events with a **future `notBefore`** that haven't reached `SimulatedComplete` /
+  `Acknowledged`; *history rows* = rows in `history`; *duplicate reports collapsed*
+  = Σ(`dedup_count − 1`).
+
+> **If asked why "upcoming" still shows 1 after a failover:** "upcoming" means
+> *future window + not yet complete*, not *not started*. An event cordoned ahead of
+> a window that hasn't arrived stays listed until its `notBefore` passes (drops off
+> automatically) or it reports `SimulatedComplete`. Another event finishing won't
+> clear it.
 
 ✅ **ADDRESSES:** persistent store + audit (#3), operator dashboard/API (#8).
 

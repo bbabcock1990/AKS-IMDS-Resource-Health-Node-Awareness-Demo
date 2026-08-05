@@ -26,7 +26,7 @@ param(
     [string]$LogicAppName  = "aks-maint-teams-notify",
     [string]$Namespace     = "aks-maintenance-demo",
     # --- Built-in Teams connector mode (default) ---
-    [string]$RecipientEmail = "you@example.com",
+    [string]$RecipientEmail = "",
     [string]$TeamsConnectionName = "aks-maint-teams",
     # --- Webhook fallback mode ---
     [string]$TeamsWebhookUrl = "",
@@ -40,6 +40,11 @@ $env:PATH = "$env:USERPROFILE\.azure-kubectl;$env:USERPROFILE\.azure-kubelogin;$
 $useConnector = (-not $UseWebhook) -and [string]::IsNullOrWhiteSpace($TeamsWebhookUrl)
 
 if ($useConnector) {
+    # Default the DM recipient to the currently signed-in user if not supplied.
+    if ([string]::IsNullOrWhiteSpace($RecipientEmail)) {
+        $RecipientEmail = az account show --query user.name -o tsv
+        Write-Host "No -RecipientEmail supplied; defaulting to signed-in user '$RecipientEmail'."
+    }
     $templatePath = Join-Path $PSScriptRoot "notifications\teams-logicapp-connector.json"
     Write-Host "Deploying Logic App '$LogicAppName' with the built-in Teams connector"
     Write-Host "(DM to $RecipientEmail) into '$ResourceGroup'..."

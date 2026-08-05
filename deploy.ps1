@@ -7,7 +7,10 @@ param(
     [string]$VmSize = "Standard_D2als_v7",
     # Optional: paste a Teams 'Workflows' webhook URL to deliver real cards to a
     # channel. Leave empty to wire the pipeline without live Teams delivery.
-    [string]$TeamsWebhookUrl = ""
+    [string]$TeamsWebhookUrl = "",
+    # Optional: Teams DM recipient for the notification card. Leave empty to
+    # default to the currently signed-in user (az account show user.name).
+    [string]$RecipientEmail = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -95,7 +98,8 @@ Write-Host "into the controller so maintenance events notify automatically..."
 & (Join-Path $Root "deploy-notifications.ps1") `
     -ResourceGroup $ResourceGroup `
     -ClusterName $ClusterName `
-    -TeamsWebhookUrl $TeamsWebhookUrl
+    -TeamsWebhookUrl $TeamsWebhookUrl `
+    -RecipientEmail $RecipientEmail
 
 Write-Host ""
 Write-Host "Deployment complete."

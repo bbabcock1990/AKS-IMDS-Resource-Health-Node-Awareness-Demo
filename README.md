@@ -39,14 +39,83 @@ Two components split the job:
 - Serves a live dashboard and JSON API (`/`, `/api/events`, `/api/upcoming`,
   `/api/history`).
 
-**The signal flow:**
+**Architecture:**
 
+```mermaid
+flowchart LR
+    HOST["Azure host maintenance<br/>(reboot / redeploy)"]
+
+    subgraph N1["AKS node 1 · VMSS instance"]
+        I1["IMDS Scheduled Events<br/>169.254.169.254"]
+        CTL1["maintenance-controller<br/>DaemonSet pod"]
+    end
+    subgraph N2["AKS node 2 · VMSS instance"]
+        I2["IMDS Scheduled Events<br/>169.254.169.254"]
+        CTL2["maintenance-controller<br/>DaemonSet pod"]
+    end
+
+    OP["maintenance-operator<br/>Deployment + PVC<br/>SQLite store + dashboard"]
+    LA["Azure Logic App<br/>Adaptive Card"]
+    TEAMS["Microsoft Teams"]
+    USER["You · browser :8080"]
+
+    HOST --> I1
+    HOST --> I2
+    I1 -->|poll 2s| CTL1
+    I2 -->|poll 2s| CTL2
+    CTL1 -->|state change| OP
+    CTL2 -->|state change| OP
+    CTL1 -->|state change| LA
+    CTL2 -->|state change| LA
+    LA --> TEAMS
+    OP -->|dashboard + API| USER
 ```
-Azure host maintenance
-   → IMDS Scheduled Events (per node)
-   → controller: filter to Reboot/Redeploy
-   → cordon node → drain pods (PDB-safe)
-   → report to operator store + notification webhook
+
+**How the controller decides (per node):**
+
+```mermaid
+flowchart TD
+    A["Poll IMDS every 2s"] --> B{"For my VM?<br/>Scheduled?<br/>Reboot or Redeploy?"}
+    B -- no --> A
+    B -- yes --> C{"Seen this eventId<br/>already? (dedup)"}
+    C -- yes --> A
+    C -- no --> D{"Live Azure event<br/>and mode = observe?"}
+    D -- yes --> O["Annotate 'Observed'<br/>log only — no drain"]
+    D -- no --> E["Cordon node"]
+    E --> F["Drain pods<br/>Eviction API · PDB-safe"]
+    F --> G["Acknowledge Azure /<br/>record SimulatedComplete"]
+    O --> R["notify() on every transition →<br/>operator store + Teams card"]
+    G --> R
+    R --> A
+```
+
+**End-to-end sequence:**
+
+```mermaid
+sequenceDiagram
+    participant Az as Azure host
+    participant IMDS as Node IMDS
+    participant Ctl as controller
+    participant K8s as Kubernetes API
+    participant Op as operator (store + dashboard)
+    participant Teams as Teams (Logic App)
+
+    Az->>IMDS: schedule Reboot/Redeploy (NotBefore)
+    loop every 2s
+        Ctl->>IMDS: GET /scheduledevents
+    end
+    IMDS-->>Ctl: event for my VM (Scheduled)
+    Ctl->>Op: report Detected
+    Ctl->>Teams: card Detected
+    Ctl->>K8s: cordon node
+    Ctl->>Op: report Cordoned
+    Ctl->>Teams: card Cordoned
+    Ctl->>K8s: drain pods (PDB-safe)
+    Ctl->>Op: report Drained
+    Ctl->>Teams: card Drained
+    Ctl->>Az: acknowledge (proceed early)
+    Ctl->>Op: report SimulatedComplete
+    Op-->>Op: normalize + dedup + persist
 ```
 
 **Why IMDS Scheduled Events:** Scheduled Events is a typed, ahead-of-time notice
@@ -125,19 +194,98 @@ kubectl port-forward -n aks-maintenance-demo svc/maintenance-operator 8080:8080
 # then open http://localhost:8080/
 ```
 
+## How the dashboard works
+
+The operator is a single pod that **only listens** — it polls nothing and makes no
+Kubernetes calls. Every controller in the fleet `POST`s a small JSON report to the
+operator's `/events` endpoint **once per state change** (`Detected`, `Cordoned`,
+`Drained`, `SimulatedComplete`, or `Observed`). The operator writes each report
+into two SQLite tables on its persistent volume and serves a page that
+auto-refreshes every 5 seconds.
+
+```mermaid
+flowchart LR
+    POST["controller POST /events<br/>one per state change"] --> ING["ingest_report()"]
+    ING -->|upsert by eventId| EV[("events table<br/>1 row per eventId<br/>last_state · dedup_count")]
+    ING -->|append| HI[("history table<br/>1 row per transition")]
+    EV --> C1["card: events tracked"]
+    EV --> C2["card: upcoming actions"]
+    EV --> C3["card: duplicate reports collapsed"]
+    HI --> C4["card: history rows"]
+```
+
+**Two tables, two jobs:**
+
+- **`events`** — the *current* state of each maintenance event. One row per unique
+  `eventId`. Repeat reports for the same event don't add rows; they update
+  `last_state` / `last_seen` and increment `dedup_count`. This is the
+  de-duplicated "what's happening now" view.
+- **`history`** — an append-only *audit trail*. One row for every transition ever
+  received, so you can replay exactly what happened and when.
+
+**The four cards, and where each number comes from:**
+
+| Card | Meaning | Source |
+| --- | --- | --- |
+| **events tracked** | distinct maintenance events seen | row count of `events` |
+| **upcoming actions** | events whose `notBefore` is still in the future *and* that haven't reached `SimulatedComplete` / `Acknowledged` | `query_upcoming()` |
+| **history rows** | total transitions recorded (audit trail) | row count of `history` |
+| **duplicate reports collapsed** | how many repeat POSTs were folded into existing rows | sum of `dedup_count − 1` over `events` |
+
+**The three tables:**
+
+- **Upcoming maintenance actions** — the subset of events still ahead of their
+  window.
+- **Tracked maintenance events** — every event with its `source`, current `state`,
+  last-seen time, and `reports` count (that's `dedup_count`).
+- **Action history** — the raw audit trail, newest first.
+
+> **Why "upcoming" can still show 1 right after a failover:** "upcoming" means
+> *future window and not yet complete* — not *not yet started*. An event that was
+> cordoned ahead of a window that hasn't arrived yet stays listed until either its
+> `notBefore` time passes (it then drops off automatically) or it reports
+> `SimulatedComplete`. A *different* event finishing does not clear it.
+
+**See it yourself:**
+
+```powershell
+kubectl port-forward -n aks-maintenance-demo svc/maintenance-operator 8080:8080
+# then open http://localhost:8080/  (or hit the JSON API directly):
+Invoke-RestMethod http://localhost:8080/api/events   | Format-Table event_id,event_type,target_node,last_state,dedup_count
+Invoke-RestMethod http://localhost:8080/api/upcoming
+Invoke-RestMethod http://localhost:8080/api/history  | Select-Object -First 10
+```
+
+Because the store lives on a **PersistentVolume**, the history survives operator
+pod restarts.
+
 ## Notifications (Teams / ServiceNow / Google Chat)
 
 On every state change the controller POSTs a JSON payload to a webhook. A ready-
 made **Teams** pipeline (Azure Logic App → Adaptive Card) is included and stands
 in for ServiceNow or Google Chat.
 
-```
-controller (state change) → Logic App → Adaptive Card → Teams Workflows webhook
+```mermaid
+flowchart LR
+    C["controller notify()"] -->|HTTP POST JSON| LA["Logic App<br/>HTTP trigger"]
+    LA --> CC["Compose Adaptive Card"]
+    CC --> M{"Delivery mode"}
+    M -->|built-in connector| DM["Teams DM to recipientEmail<br/>via Flow bot"]
+    M -->|Workflows webhook| CH["Post to a Teams channel"]
 ```
 
 A card fires once per state change, only for `Reboot` / `Redeploy` events. It is
 wired automatically by `deploy.ps1`, so `demo.ps1` sends notifications with no
-extra step.
+extra step. In the default (built-in Teams connector) mode the card is sent as a
+**DM to the recipient**, which defaults to your **currently signed-in user**
+(`az account show` → `user.name`). Override it with `-RecipientEmail`:
+
+```powershell
+# Full deploy, DM the card to a specific person:
+.\deploy.ps1 -RecipientEmail "you@yourdomain.com"
+# or, if the cluster is already up, (re)wire just the notification recipient:
+.\deploy-notifications.ps1 -RecipientEmail "you@yourdomain.com"
+```
 
 ```powershell
 # Deliver real cards to a Teams channel (create a Teams 'Workflows' webhook first):
