@@ -1,0 +1,63 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: maintenance-demo-app
+  namespace: aks-maintenance-demo
+spec:
+  replicas: 4
+  selector:
+    matchLabels:
+      app: maintenance-demo-app
+  template:
+    metadata:
+      labels:
+        app: maintenance-demo-app
+    spec:
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: maintenance-demo-app
+      containers:
+        - name: web
+          image: nginx:1.27-alpine
+          ports:
+            - containerPort: 80
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 80
+            initialDelaySeconds: 2
+            periodSeconds: 2
+          resources:
+            requests:
+              cpu: 20m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 96Mi
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: maintenance-demo-app
+  namespace: aks-maintenance-demo
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: maintenance-demo-app
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: maintenance-demo-app
+  namespace: aks-maintenance-demo
+spec:
+  selector:
+    app: maintenance-demo-app
+  ports:
+    - port: 80
+      targetPort: 80

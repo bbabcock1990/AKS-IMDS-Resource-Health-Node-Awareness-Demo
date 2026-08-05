@@ -1,0 +1,19 @@
+# Secrets / runtime
+notifications/.callback-url.txt
+*.callback-url.txt
+
+# Node
+node_modules/
+deck/render/
+
+# Python
+__pycache__/
+*.pyc
+
+# Build artifacts
+*.pdf
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.playwright-mcp/

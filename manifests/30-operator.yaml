@@ -1,0 +1,148 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: maintenance-operator
+  namespace: aks-maintenance-demo
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: maintenance-operator
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "watch", "patch", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: maintenance-operator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: maintenance-operator
+subjects:
+  - kind: ServiceAccount
+    name: maintenance-operator
+    namespace: aks-maintenance-demo
+---
+# Prod/dev subscription lists the operator "polls" (analogous to the real
+# subscription list helpers). In production these drive one Resource Health
+# query per subscription.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: maintenance-subscriptions
+  namespace: aks-maintenance-demo
+data:
+  subscriptions.json: |
+    {
+      "prod": ["00000000-0000-0000-0000-000000000000"],
+      "dev": ["00000000-0000-0000-0000-000000000000"]
+    }
+---
+# Resource Health-shaped signals the poller reads. Empty by default; the
+# hardware demo injects a "Degraded" signal here to simulate a real HW failure.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: maintenance-resource-health
+  namespace: aks-maintenance-demo
+data:
+  signals.json: |
+    {"value": []}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: maintenance-operator-data
+  namespace: aks-maintenance-demo
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: maintenance-operator
+  namespace: aks-maintenance-demo
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: maintenance-operator
+  template:
+    metadata:
+      labels:
+        app: maintenance-operator
+    spec:
+      serviceAccountName: maintenance-operator
+      containers:
+        - name: operator
+          image: python:3.12-slim
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/sh
+            - -c
+            - pip install --no-cache-dir requests kubernetes && python /app/maintenance_operator.py
+          env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: POLL_SECONDS
+              value: "5"
+            - name: HTTP_PORT
+              value: "8080"
+            - name: DB_PATH
+              value: /data/maintenance.db
+            - name: NOTIFICATION_WEBHOOK_URL
+              value: ""
+          ports:
+            - containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 20
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 25m
+              memory: 96Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+          volumeMounts:
+            - name: operator-code
+              mountPath: /app
+              readOnly: true
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: operator-code
+          configMap:
+            name: maintenance-operator-code
+        - name: data
+          persistentVolumeClaim:
+            claimName: maintenance-operator-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: maintenance-operator
+  namespace: aks-maintenance-demo
+spec:
+  selector:
+    app: maintenance-operator
+  ports:
+    - port: 8080
+      targetPort: 8080
