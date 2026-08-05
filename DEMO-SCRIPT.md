@@ -311,7 +311,7 @@ inside the ~10–15 min real notice windows, or tune per event.
 
 ⌨️ **DO:** switch to the browser tab **http://localhost:8080/** (already tunneled).
 👀 **POINT AT:**
-- **Subscriptions polled** — your prod + dev lists (#1).
+- **Tracked maintenance events** — every node's IMDS reports, normalized here as the fleet-wide view (#1).
 - **Upcoming maintenance actions** — the scheduling view (#8).
 - **All normalized events** with **dedup counts** (#3/#4).
 - **Action history** — the full audit trail; every Detect/Cordon/Drain/Complete.
